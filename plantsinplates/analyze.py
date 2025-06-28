@@ -124,6 +124,10 @@ def prepare_info(
 
     long_df["fluo"] = long_df["fluo"].replace(np.nan, pd.NA)
 
+    long_df["fluo"] = long_df["fluo"].map(
+        lambda x: str(pathlib.Path(pathlib.PurePosixPath(x).as_posix()))
+    )
+
     return long_df
 
 
@@ -195,7 +199,7 @@ def preflight_date(date_dir: pathlib.Path, long_df: pd.DataFrame) -> dict[str, A
     in_fs = {
         str(fluo_file.relative_to(date_dir)): fluo_file
         for fluo_file in date_dir.rglob("*.czi")
-        if fluo_file.suffix in io.FLUO_SUFFIXES
+        if fluo_file.suffix in io.FLUO_SUFFIXES and not fluo_file.stem.startswith(".")
     }
 
     in_df: set[str] = set(long_df["fluo"][~long_df["fluo"].isna()].unique())
@@ -327,7 +331,12 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
     else:
         records = measure_plate(preflight_dict)
         df = pd.DataFrame.from_records(records)
-        df.sort_values(["date", "genotype", "row", "col"], inplace=True)
+        try:
+            df.sort_values(["date", "genotype", "row", "col"], inplace=True)
+        except Exception as ex:
+            print(df.columns)
+            raise ex
+
         df.attrs["overview_path"] = {
             date: pdd["overview_path"] for date, pdd in preflight_dict["dates"].items()
         }
