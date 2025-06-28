@@ -13,6 +13,10 @@ matplotlib.use("Agg")
 
 from plantsinplates import analyze, io
 
+warnings.filterwarnings(
+    "ignore", message=".*The color list has more values.*", category=UserWarning
+)
+
 SPINNER_CHARS = ["◐", "◓", "◑", "◒"]
 TITLE = f"Plants in Plates - Analyze Experiment or Plate Folder ({io.__version__})"
 
@@ -46,11 +50,27 @@ def analyze_in_background(
     func: Callable[[pathlib.Path], None],
     folder: pathlib.Path,
 ):
-    with warnings.filterwarnings(
-        "ignore", message=".*The color list has more values.*", category=UserWarning
-    ):
-        func(folder)
+    func(folder)
     app.after(0, lambda: analyze_done(folder))
+
+
+class RelativeTimeFormatter(logging.Formatter):
+    started = 0
+
+    def format(self, record) -> str:
+        total_seconds = record.created - self.started
+
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+        seconds = int(total_seconds % 60)
+
+        millis = int((total_seconds - int(total_seconds)) * 1000)
+
+        time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+        record.relative_hms = time_str  # Add custom attribute for formatting
+
+        return super().format(record)
 
 
 class TextHandler(logging.Handler):
@@ -130,10 +150,10 @@ class AnalyzeApp(tk.Tk):
 
     def setup_logging(self):
         text_handler = TextHandler(self.log_text)
-        formatter = logging.Formatter(
-            "%(relativeCreated).2f - %(levelname)s - %(message)s"
+        self.formatter = RelativeTimeFormatter(
+            "%(relative_hms)s - %(levelname)s - %(message)s"
         )
-        text_handler.setFormatter(formatter)
+        text_handler.setFormatter(self.formatter)
         io.logger.addHandler(text_handler)
         io.logger.setLevel(logging.INFO)
 
@@ -152,7 +172,13 @@ class AnalyzeApp(tk.Tk):
             return
 
         if action == "delete":
+            self.formatter.started = time.time()
             self.set_busy(True)
+
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", tk.END)
+            self.log_text.configure(state="disabled")
+
             threading.Thread(
                 target=delete_in_background,
                 args=(path,),
@@ -166,8 +192,13 @@ class AnalyzeApp(tk.Tk):
         else:  # if path.stem.startswith("plate"):
             func = analyze.analyze_plate_folder
 
+        self.formatter.started = time.time()
         self.set_busy(True)
+
+        self.log_text.configure(state="normal")
         self.log_text.delete("1.0", tk.END)
+        self.log_text.configure(state="disabled")
+
         threading.Thread(
             target=analyze_in_background,
             args=(
@@ -186,5 +217,4 @@ if __name__ == "__main__":
     icon.put("white", to=(6, 0, 10, 10))
     app.iconphoto(True, icon)
 
-    io.logger.info("Application started.")
     app.mainloop()
