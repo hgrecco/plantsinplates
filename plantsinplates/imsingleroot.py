@@ -223,6 +223,6 @@ def measure_image(path: pathlib.Path) -> dict[str, Any] | None:
         mask = morphology.remove_small_objects(mask)
         mask = morphology.remove_small_holes(mask)
         assert _types.is_mask_image(mask), "Not a mask image"
-        skio.imsave(mask_path, mask.astype(np.uint8) * 255)
+        skio.imsave(mask_path, mask.astype(np.uint8) * 255, check_contrast=False)
 
     return _measure_image(im, mask)
