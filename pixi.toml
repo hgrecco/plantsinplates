@@ -6,7 +6,7 @@ platforms = ["osx-arm64", "linux-64", "win-64"]
 version = "0.1.0"
 
 [tasks]
-from-zip = "python -m plantsinplates"
+from-zip = "python plantsinplates.zip"
 from-local = "python __main__.py"
 
 build = "python -m zipfile -c plantsinplates.zip __main__.py pixi.toml pixi.lock plantsinplates"
@@ -17,9 +17,6 @@ publish = { cmd = "scp plantsinplates.zip df:/home/hgrecco/html/pkg", depends-on
 download = """python -c "import requests; open('plantsinplates.zip','wb').write(requests.get('http://users.df.uba.ar/hgrecco/pkg/plantsinplates.zip').content)" """
 update-env = { cmd = """python -c "import zipfile; z=zipfile.ZipFile('plantsinplates.zip');z.extract('pixi.toml');z.extract('pixi.lock')" """, depends-on = [
   "download",
-] }
-update-app = { cmd = "python -m zipfile -u plantsinplates.zip .", depends-on = [
-  "update-env",
 ] }
 
 
