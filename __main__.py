@@ -6,7 +6,7 @@ import time
 import threading
 import pathlib
 from typing import Callable, Literal
-
+import warnings
 import matplotlib
 
 matplotlib.use("Agg")
@@ -14,7 +14,7 @@ matplotlib.use("Agg")
 from plantsinplates import analyze, io
 
 SPINNER_CHARS = ["◐", "◓", "◑", "◒"]
-TITLE = "Plants in Plates - Analyze Experiment or Plate Folder"
+TITLE = f"Plants in Plates - Analyze Experiment or Plate Folder ({io.__version__})"
 
 
 def spinner_task():
@@ -35,12 +35,22 @@ def delete_in_background(folder: pathlib.Path):
     app.after(0, lambda: app.set_busy(False))
 
 
+def analyze_done(folder: pathlib.Path):
+    content = app.log_text.get("1.0", tk.END)
+    with open(folder / (io.PREFIX + "log.txt"), "w", encoding="utf-8") as f:
+        f.write(content)
+    app.set_busy(False)
+
+
 def analyze_in_background(
     func: Callable[[pathlib.Path], None],
     folder: pathlib.Path,
 ):
-    func(folder)
-    app.after(0, lambda: app.set_busy(False))
+    with warnings.filterwarnings(
+        "ignore", message=".*The color list has more values.*", category=UserWarning
+    ):
+        func(folder)
+    app.after(0, lambda: analyze_done(folder))
 
 
 class TextHandler(logging.Handler):
@@ -157,7 +167,7 @@ class AnalyzeApp(tk.Tk):
             func = analyze.analyze_plate_folder
 
         self.set_busy(True)
-
+        self.log_text.delete("1.0", tk.END)
         threading.Thread(
             target=analyze_in_background,
             args=(
