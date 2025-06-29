@@ -1,15 +1,13 @@
-import os
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import logging
 import time
 import threading
 import pathlib
-from typing import Callable, Literal
+from typing import Annotated, Callable, Literal
 import warnings
-import matplotlib
 
-matplotlib.use("Agg")
+import typer
 
 from plantsinplates import analyze, io
 
@@ -94,7 +92,7 @@ class TextHandler(logging.Handler):
 class AnalyzeApp(tk.Tk):
     is_busy: bool = False
 
-    def __init__(self):
+    def __init__(self, data_dir: str):
         super().__init__()
 
         self.title(TITLE)
@@ -109,6 +107,8 @@ class AnalyzeApp(tk.Tk):
         self.geometry(f"{window_width}x{window_height}+{x_coord}+{y_coord}")
 
         self.checkbox_var = tk.BooleanVar()
+
+        self.data_dir = data_dir
 
         self.create_widgets()
         self.setup_logging()
@@ -160,7 +160,7 @@ class AnalyzeApp(tk.Tk):
     def open_file_dialog(self, action: Literal["analyze", "delete"]):
         folder = filedialog.askdirectory(
             title="Select an experiment or plate directory to process",
-            initialdir=os.environ.get("DATA_DIR", ""),
+            initialdir=self.data_dir,
             mustexist=True,
         )
 
@@ -210,11 +210,27 @@ class AnalyzeApp(tk.Tk):
         threading.Thread(target=spinner_task, daemon=True).start()
 
 
-if __name__ == "__main__":
-    app = AnalyzeApp()
+app = typer.Typer()
+
+
+@app.command()
+def gui(data_dir: Annotated[str, typer.Argument(envvar="DATA_DIR")] = "."):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    app = AnalyzeApp(data_dir)
     icon = tk.PhotoImage(width=16, height=16)
     icon.put("black", to=(0, 0, 16, 16))
     icon.put("white", to=(6, 0, 10, 10))
     app.iconphoto(True, icon)
 
     app.mainloop()
+
+
+@app.command()
+def version():
+    print(io.__version__)
+
+
+if __name__ == "__main__":
+    app()
