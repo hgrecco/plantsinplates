@@ -9,37 +9,37 @@ import warnings
 
 import typer
 
-from plantsinplates import analyze, io
+from plantsinplates import analyze, io as pipio
 
 warnings.filterwarnings(
     "ignore", message=".*The color list has more values.*", category=UserWarning
 )
 
 SPINNER_CHARS = ["◐", "◓", "◑", "◒"]
-TITLE = f"Plants in Plates - Analyze Experiment or Plate Folder ({io.__version__})"
+TITLE = f"Plants in Plates - Analyze Experiment or Plate Folder ({pipio.__version__})"
 
 
 def spinner_task():
     idx = 0
-    io.logger.info("The application is busy ...")
+    pipio.logger.info("The application is busy ...")
     while app.is_busy:
         state = SPINNER_CHARS[idx % len(SPINNER_CHARS)]
         app.after(0, lambda: app.title(f"{state} {TITLE}"))
         app.update_idletasks()
         idx += 1
         time.sleep(0.1)
-    io.logger.info("The application is no longer busy.")
+    pipio.logger.info("The application is no longer busy.")
     app.title(TITLE)
 
 
 def delete_in_background(folder: pathlib.Path):
-    io.delete_cache(folder)
+    pipio.delete_cache(folder)
     app.after(0, lambda: app.set_busy(False))
 
 
 def analyze_done(folder: pathlib.Path):
     content = app.log_text.get("1.0", tk.END)
-    with open(folder / (io.PREFIX + "log.txt"), "w", encoding="utf-8") as f:
+    with open(folder / (pipio.PREFIX + "log.txt"), "w", encoding="utf-8") as f:
         f.write(content)
     app.set_busy(False)
 
@@ -79,7 +79,7 @@ class TextHandler(logging.Handler):
         self.text_widget = text_widget
 
     def emit(self, record: logging.LogRecord):
-        # if record.name != io.logger.name:
+        # if record.name != pipio.logger.name:
         #     print(record.name)
         #     return
         msg = self.format(record) + "\n"
@@ -154,8 +154,8 @@ class AnalyzeApp(tk.Tk):
             "%(relative_hms)s - %(levelname)s - %(message)s"
         )
         text_handler.setFormatter(self.formatter)
-        io.logger.addHandler(text_handler)
-        io.logger.setLevel(logging.INFO)
+        pipio.logger.addHandler(text_handler)
+        pipio.logger.setLevel(logging.INFO)
 
     def open_file_dialog(self, action: Literal["analyze", "delete"]):
         folder = filedialog.askdirectory(
@@ -210,11 +210,14 @@ class AnalyzeApp(tk.Tk):
         threading.Thread(target=spinner_task, daemon=True).start()
 
 
-app = typer.Typer()
+app = None
+tapp = typer.Typer()
 
 
-@app.command()
-def gui(data_dir: Annotated[str, typer.Argument(envvar="DATA_DIR")] = "."):
+@tapp.command()
+def gui(data_dir: Annotated[str, typer.Argument(envvar="DATA_DIR")] = ""):
+    global app
+
     import matplotlib
 
     matplotlib.use("Agg")
@@ -227,10 +230,27 @@ def gui(data_dir: Annotated[str, typer.Argument(envvar="DATA_DIR")] = "."):
     app.mainloop()
 
 
-@app.command()
+@tapp.command()
 def version():
-    print(io.__version__)
+    print(pipio.__version__)
+
+
+@tapp.command()
+def update():
+    import requests
+    import zipfile
+
+    print("Downloading app from server ...")
+    new_version = requests.get(
+        "http://users.df.uba.ar/hgrecco/pkg/plantsinplates-app"
+    ).content
+    with open(".tmp.new_version", mode="wb") as fo:
+        fo.write(new_version)
+    print("Updating environment ...")
+    with zipfile.ZipFile(".tmp.new_version") as z:
+        z.extract("pixi.toml")
+        z.extract("pixi.lock")
 
 
 if __name__ == "__main__":
-    app()
+    tapp()
