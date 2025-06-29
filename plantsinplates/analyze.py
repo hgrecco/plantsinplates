@@ -355,6 +355,10 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
             lambda x: x.diff()
         )
 
+        df["avg_tip_mean_intensity"] = df.groupby(["plate", "row", "col"])[
+            "tip_mean_intensity"
+        ].transform(lambda x: x.rolling(2).mean())
+
         df["delta_length_per_day"] = df["delta_length"] / df["delta_date"]
         df["delta_tip_mean_intensity_per_day"] = (
             df["delta_tip_mean_intensity"] / df["delta_date"]

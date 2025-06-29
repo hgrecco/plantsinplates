@@ -566,6 +566,16 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
             alpha="edate",
         ),
     )
+    seaborn_plot(
+        pdf_writer,
+        dict(
+            data=plate_df,
+            x="avg_tip_mean_intensity",
+            y="delta_length_per_day",
+            color="genotype",
+            alpha="edate",
+        ),
+    )
 
 
 def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
