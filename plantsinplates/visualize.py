@@ -272,8 +272,10 @@ def relabel(s: str) -> str:
         return "tip mean intensity change [1/day]"
     if s == "tip_mean_intensity":
         return "tip mean intensity"
-    if s == "edate":
+    if s == "day_number":
         return "day"
+    if s == "plant_id_in_gt":
+        return "plant number (gt)"
     return s
 
 
@@ -290,11 +292,14 @@ def seaborn_plot(
         (
             so.Plot(**plot_kwargs)
             .add(so.Dot(), so.Shift(y=np.nan))
-            .add(so.Dot(), marker="plant_id_internal", legend=False)
-            .theme(axes_style("whitegrid"))
+            .add(so.Dot(), marker="plant_id_in_gt", legend=False)
+            .theme(
+                axes_style("whitegrid")
+                | {"legend.fontsize": 8, "legend.title_fontsize": 10}
+            )
             .layout(extent=(0.05, 0.05, 0.80, 0.95), engine="tight")
             .scale(color=TAB10_COLORS, alpha=(1, 0.3))  # type: ignore
-            .label(x=relabel, y=relabel, alpha=relabel)
+            .label(x=relabel, y=relabel, alpha=relabel, marker=relabel)
             .facet(**facet_kwargs)
             .on(fig)
             .plot(pyplot=True)
@@ -347,12 +352,6 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         default_footnote(fig)
 
     return
-    experiment_df["edate"] = experiment_df["delta_date"].map(
-        lambda x: "0" if pd.isna(x) else f"+{x}"
-    )
-    experiment_df["plant_id_internal"] = (
-        experiment_df.groupby(["plate", "date", "genotype"]).cumcount().astype(str)
-    )
 
     #################
     # y-categoricals
@@ -363,7 +362,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         dict(
             data=experiment_df,
             x="length",
-            y="edate",
+            y="day_number",
             color="genotype",
         ),
         dict(row="genotype", col="plate"),
@@ -373,7 +372,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         dict(
             data=experiment_df,
             x="delta_length_per_day",
-            y="edate",
+            y="day_number",
             color="genotype",
             marker="plate",
         ),
@@ -384,7 +383,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         dict(
             data=experiment_df,
             x="tip_mean_intensity",
-            y="edate",
+            y="day_number",
             color="genotype",
         ),
         dict(row="genotype", col="plate"),
@@ -394,7 +393,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         dict(
             data=experiment_df,
             x="delta_tip_mean_intensity_per_day",
-            y="edate",
+            y="day_number",
             color="genotype",
         ),
         dict(row="genotype", col="plate"),
@@ -411,7 +410,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
             x="tip_mean_intensity",
             y="length",
             color="genotype",
-            alpha="edate",
+            alpha="day_number",
         ),
         dict(row="genotype", col="plate"),
     )
@@ -422,7 +421,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
             x="delta_tip_mean_intensity_per_day",
             y="delta_length_per_day",
             color="genotype",
-            alpha="edate",
+            alpha="day_number",
         ),
         dict(row="genotype", col="plate"),
     )
@@ -446,14 +445,18 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
         plate_df["row"].astype(str) + " | " + plate_df["col"].astype(str)
     )
 
-    with pdf_figure(pdf_writer, 3, 4, ax_style="off") as (fig, axs):
-        ax_rest = axs[1:, :].flatten()
+    with pdf_figure(pdf_writer, 4, 4, ax_style="off") as (fig, axs):
+        ax_rest = axs[1:3, :].flatten()
         gs = axs[0, 0].get_gridspec()
+
+        ax_bottom = fig.add_subplot(gs[-1, :])
 
         axs[0, 0].remove()
         axs[0, 1].remove()
+        axs[0, 2].remove()
+        axs[0, 3].remove()
 
-        axbig = fig.add_subplot(gs[0, :2])
+        axbig = fig.add_subplot(gs[0, :])
         axbig.axis(False)
 
         genotypes: list[str] = sorted(plate_df["genotype"].unique())
@@ -468,8 +471,8 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
                 ax.text(
                     0.5,
                     0.5,
-                    "No plate overview image",
-                    size=15,
+                    "No plate\noverview\nimage",
+                    size=10,
                     horizontalalignment="center",
                     verticalalignment="center",
                 )
@@ -481,16 +484,23 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
         title = f"Plate {plate_df['plate'].iloc[0]} - {len(plate_df)} records"
         fig.suptitle(f"{title}\n{nrows} rows x {ncols} cols", size="small")
 
-        cell_text = (
-            plate_df.groupby("genotype", as_index=False)
-            .size()
-            .sort_values("genotype")
-            .values
+        out = plate_df.pivot_table(
+            values="col",
+            columns="date",
+            index="genotype",
+            aggfunc="count",
+            fill_value=0,
         )
+        out_reset = out.reset_index()
+        columns = ["Genotype"] + [f"{col}" for col in out.columns]
+        cell_text = out_reset[["genotype"] + [col for col in out.columns]].values
+
+        genotypes = cell_text[:, 0].tolist()
+
         cell_text = np.column_stack(([""] * cell_text.shape[0], cell_text))
         table = axbig.table(
             cellText=cell_text,
-            colLabels=["", "Genotype", "Plants"],
+            colLabels=[""] + columns,
             loc="center",
             cellLoc="center",
         )
@@ -503,6 +513,28 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
 
         default_footnote(fig)
 
+        _tmp = pd.DataFrame({"x": np.arange(1, out.values.max() + 2)})
+        _tmp["x"] = _tmp["x"].astype(str)
+        (
+            so.Plot(data=_tmp, x="x", y=1, marker="x")
+            .add(so.Dot(), legend=False)
+            .layout(engine="tight")
+            .theme(
+                {
+                    "font.size": 1,
+                    "axes.titlesize": 1,
+                    "axes.labelsize": 1,
+                    "xtick.labelsize": 1,
+                    "ytick.labelsize": 1,
+                    "legend.fontsize": 1,
+                }
+            )
+            .label(x="plant number (gt)", y="")
+            .scale(y=so.Nominal().label(None))
+            .on(ax_bottom)
+            .plot()
+        )
+
     for ndx, (date, gdf) in enumerate(plate_df.groupby("date")):
         generate_dateview(pdf_writer, gdf)
 
@@ -510,26 +542,19 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
     # y-categoricals
     #################
 
-    plate_df["edate"] = plate_df["delta_date"].map(
-        lambda x: "0" if pd.isna(x) else f"+{x}"
-    )
-    plate_df["plant_id_internal"] = (
-        plate_df.groupby(["plate", "date", "genotype"]).cumcount().astype(str)
-    )
-
     seaborn_plot(
         pdf_writer,
-        dict(data=plate_df, x="length", y="edate", color="genotype"),
+        dict(data=plate_df, x="length", y="day_number", color="genotype"),
         dict(row="genotype"),
     )
     seaborn_plot(
         pdf_writer,
-        dict(data=plate_df, x="delta_length_per_day", y="edate", color="genotype"),
+        dict(data=plate_df, x="delta_length_per_day", y="day_number", color="genotype"),
         dict(row="genotype"),
     )
     seaborn_plot(
         pdf_writer,
-        dict(data=plate_df, x="tip_mean_intensity", y="edate", color="genotype"),
+        dict(data=plate_df, x="tip_mean_intensity", y="day_number", color="genotype"),
         dict(row="genotype"),
     )
     seaborn_plot(
@@ -537,7 +562,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
         dict(
             data=plate_df,
             x="delta_tip_mean_intensity_per_day",
-            y="edate",
+            y="day_number",
             color="genotype",
         ),
         dict(row="genotype"),
@@ -553,7 +578,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
             x="tip_mean_intensity",
             y="length",
             color="genotype",
-            alpha="edate",
+            alpha="day_number",
         ),
     )
     seaborn_plot(
@@ -563,7 +588,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
             x="delta_tip_mean_intensity_per_day",
             y="delta_length_per_day",
             color="genotype",
-            alpha="edate",
+            alpha="day_number",
         ),
     )
     seaborn_plot(
@@ -573,7 +598,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
             x="avg_tip_mean_intensity",
             y="delta_length_per_day",
             color="genotype",
-            alpha="edate",
+            alpha="day_number",
         ),
     )
 
@@ -623,9 +648,20 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
             ax.set_yticks([])
             ax.imshow(im, cmap="gray")
 
+            ax.text(
+                0.02,
+                0.98,
+                record["plant_id_in_gt"],
+                transform=ax.transAxes,  # Coordinates relative to Axes (0 to 1)
+                fontsize=5,
+                color="white",
+                ha="left",
+                va="top",
+            )
+
             if genotypes:
                 colorize_axes(
-                    ax, TAB10_COLORS[genotypes.index(record["genotype"])], width=0.5
+                    ax, TAB10_COLORS[genotypes.index(record["genotype"])], width=1.5
                 )
 
             if row == 1:

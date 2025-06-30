@@ -341,6 +341,7 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
             date: pdd["overview_path"] for date, pdd in preflight_dict["dates"].items()
         }
         df["plate"] = preflight_dict["plate"]
+
         df["tip_mean_intensity"] = df["tip_fg_mean"] - df["tip_bg_mean"]
 
         df["date_float"] = df["date"].map(float)
@@ -363,6 +364,12 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
         df["delta_tip_mean_intensity_per_day"] = (
             df["delta_tip_mean_intensity"] / df["delta_date"]
         )
+
+        df["day_number"] = df["delta_date"].map(
+            lambda x: "0" if pd.isna(x) else f"+{x}"
+        )
+        df["plant_id_in_gt"] = df.groupby(["plate", "date", "genotype"]).cumcount()
+        df["plant_id_in_gt"] = (df["plant_id_in_gt"] + 1).astype(str)
 
         df.to_pickle(df_path)
 
