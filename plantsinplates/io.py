@@ -7,7 +7,7 @@ import logging
 
 from .types import IntensityImage, is_intensity_image
 
-__version__ = "2025.06.26"
+__version__ = "2025.07.10"
 
 PREFIX = "_output_"
 
