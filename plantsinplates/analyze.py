@@ -1,6 +1,8 @@
 import pickle
-from typing import Any
+from typing import Any, Literal
 import pathlib
+from decimal import Decimal
+from fractions import Fraction
 
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
@@ -11,6 +13,43 @@ from . import imsingleroot
 from . import visualize
 
 THRESHOLD = 100
+
+
+def date_to_float(s: str) -> Fraction:
+    value = Fraction(s)
+    days = int(value)
+    rest = (value - days) * 10_000
+    if rest >= 2400:
+        raise Exception(
+            f"The hour/minute part must be four digits (HHmm), and smaller than 2359. Found {rest} in {s}"
+        )
+    return days + rest / 2400
+
+
+def day_number(days: Decimal, min_level: Literal["h", "m"] | None = None) -> str:
+    int_days = int(days)
+    rest = days - int_days
+
+    current = str(int_days) + "d"
+
+    if rest < 1 / 24 / 60 and min_level is None:
+        return current
+
+    hours = rest * 24
+    int_hours = int(hours)
+    rest = hours - int_hours
+
+    current += f"{int_hours:02d}h"
+
+    if rest < 1 / 60 and min_level in (None, "h"):
+        return current
+
+    minutes = rest * 60
+    int_minutes = int(minutes)
+    rest = minutes - int_minutes
+
+    current += f"{int_minutes:02d}m"
+    return current
 
 
 def diff(
@@ -319,6 +358,13 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
             preflight_dict = preflight_plate(
                 plate_dir, prepare_info(pd.read_excel(plate_dir / "info.xlsx"))
             )
+            if len(preflight_dict["dates"]) == 0:
+                io.logger.error(
+                    "No matching date columns\n"
+                    f"Dates only in info.xlsx: {preflight_dict['only_in_df']}\n"
+                    f"Dates only in filesystem: {preflight_dict['only_in_fs']}\n"
+                )
+                return
         except Exception as ex:
             io.logger.error(f"Error while preflighting plate {plate_dir.name}: {ex}")
             return
@@ -331,11 +377,6 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
     else:
         records = measure_plate(preflight_dict)
         df = pd.DataFrame.from_records(records)
-        try:
-            df.sort_values(["date", "genotype", "row", "col"], inplace=True)
-        except Exception as ex:
-            print(df.columns)
-            raise ex
 
         df.attrs["overview_path"] = {
             date: pdd["overview_path"] for date, pdd in preflight_dict["dates"].items()
@@ -344,11 +385,38 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
 
         df["tip_mean_intensity"] = df["tip_fg_mean"] - df["tip_bg_mean"]
 
-        df["date_float"] = df["date"].map(float)
+        df["date_float"] = df["date"].map(date_to_float)
+        df["delta_date"] = df["date_float"] - df["date_float"].min()
 
-        df["delta_date"] = df.groupby(["plate", "row", "col"])["date_float"].transform(
-            lambda x: x.diff()
+        df["day_number"] = df["delta_date"].map(
+            lambda x: "0" if pd.isna(x) else "+" + day_number(x)
         )
+
+        # Find max length of the day string which is typically
+        # +XdYYhZZm
+        tmp = (
+            df["day_number"]
+            .map(lambda x: len(x.split("d")[-1]) if "d" in x else 0)
+            .max()
+        )
+        if tmp == 3:
+            # YYh
+            df["day_number"] = df["delta_date"].map(
+                lambda x: "0" if pd.isna(x) else "+" + day_number(x, "h")
+            )
+        elif tmp == 6:
+            # YYhZZm
+            df["day_number"] = df["delta_date"].map(
+                lambda x: "0" if pd.isna(x) else "+" + day_number(x, "m")
+            )
+        elif tmp != 0:
+            print(f"Unexpected max length: {tmp}")
+
+        df["date_float"] = df["date_float"].astype(float)
+        df["delta_date"] = df["delta_date"].astype(float)
+
+        df.sort_values(["date_float", "genotype", "row", "col"], inplace=True)
+
         df["delta_tip_mean_intensity"] = df.groupby(["plate", "row", "col"])[
             "tip_mean_intensity"
         ].transform(lambda x: x.diff())
@@ -365,9 +433,6 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
             df["delta_tip_mean_intensity"] / df["delta_date"]
         )
 
-        df["day_number"] = df["delta_date"].map(
-            lambda x: "0" if pd.isna(x) else f"+{x}"
-        )
         df["plant_id_in_gt"] = df.groupby(["plate", "date", "genotype"]).cumcount()
         df["plant_id_in_gt"] = (df["plant_id_in_gt"] + 1).astype(str)
 
