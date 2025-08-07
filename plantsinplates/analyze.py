@@ -386,9 +386,9 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
         df["tip_mean_intensity"] = df["tip_fg_mean"] - df["tip_bg_mean"]
 
         df["date_float"] = df["date"].map(date_to_float)
-        df["delta_date"] = df["date_float"] - df["date_float"].min()
+        df["delta_date_from_min"] = df["date_float"] - df["date_float"].min()
 
-        df["day_number"] = df["delta_date"].map(
+        df["day_number"] = df["delta_date_from_min"].map(
             lambda x: "0" if pd.isna(x) else "+" + day_number(x)
         )
 
@@ -401,19 +401,19 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
         )
         if tmp == 3:
             # YYh
-            df["day_number"] = df["delta_date"].map(
+            df["day_number"] = df["delta_date_from_min"].map(
                 lambda x: "0" if pd.isna(x) else "+" + day_number(x, "h")
             )
         elif tmp == 6:
             # YYhZZm
-            df["day_number"] = df["delta_date"].map(
+            df["day_number"] = df["delta_date_from_min"].map(
                 lambda x: "0" if pd.isna(x) else "+" + day_number(x, "m")
             )
         elif tmp != 0:
             print(f"Unexpected max length: {tmp}")
 
         df["date_float"] = df["date_float"].astype(float)
-        df["delta_date"] = df["delta_date"].astype(float)
+        df["delta_date_from_min"] = df["delta_date_from_min"].astype(float)
 
         df.sort_values(["date_float", "genotype", "row", "col"], inplace=True)
 
@@ -423,6 +423,9 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
         df["delta_length"] = df.groupby(["plate", "row", "col"])["length"].transform(
             lambda x: x.diff()
         )
+        df["delta_date"] = df.groupby(["plate", "row", "col"])[
+            "delta_date_from_min"
+        ].transform(lambda x: x.diff())
 
         df["avg_tip_mean_intensity"] = df.groupby(["plate", "row", "col"])[
             "tip_mean_intensity"
