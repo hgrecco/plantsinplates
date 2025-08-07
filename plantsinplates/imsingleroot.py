@@ -205,8 +205,15 @@ def _measure_image(im: IntensityImage, mask: MaskImage) -> dict[str, Any] | None
 
     assert _types.is_mask_image(root_mask), "Not a mask image"
 
+    if max(im.shape) > 1000:
+        # Probably a 1x
+        box = 750
+    else:
+        # Probably a 8x
+        box = 85
+
     return {
-        **prefix_keys("tip_", measure_roi_at_tip_simple(im, root_mask, 750)),
+        **prefix_keys("tip_", measure_roi_at_tip_simple(im, root_mask, box)),
         **prefix_keys("full_", measure_roi(im, root_mask)),
     }
 
