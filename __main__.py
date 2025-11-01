@@ -252,5 +252,17 @@ def update():
         z.extract("pixi.lock")
 
 
+@tapp.command()
+def test(data_dir: Annotated[str, typer.Argument(envvar="DATA_DIR")] = ""):
+    path = pathlib.Path(data_dir)
+    print(path)
+    pipio.delete_cache(path)
+    if path.stem.startswith("experiment"):
+        func = analyze.analyze_experiment_folder
+    else:  # if path.stem.startswith("plate"):
+        func = analyze.analyze_plate_folder
+    func(path)
+
+
 if __name__ == "__main__":
     tapp()

@@ -8,6 +8,7 @@ from skimage.measure import regionprops
 
 from . import io
 from . import types as _types
+from . import skeleton_utils
 
 from .types import (
     MaskImage,
@@ -15,10 +16,13 @@ from .types import (
     IntensityImage,
     FloatVector,
     RoiMeasurement,
+    SkeletonMeasurement,
 )
 
 
-def prefix_keys(prefix: str, adict: dict[str, Any]) -> dict[str, Any]:
+def prefix_keys(
+    prefix: str, adict: dict[str, Any], skip_: bool = False
+) -> dict[str, Any]:
     """Prefix all keys in a dictionary.
 
     Parameters
@@ -33,7 +37,10 @@ def prefix_keys(prefix: str, adict: dict[str, Any]) -> dict[str, Any]:
     dict[str, Any]
         New dictionary with prefixed keys.
     """
-    return {(prefix + k): v for k, v in adict.items()}
+    if skip_:
+        return {(prefix + k): v for k, v in adict.items() if not k.startswith("_")}
+    else:
+        return {(prefix + k): v for k, v in adict.items()}
 
 
 def sort_labels(
@@ -175,7 +182,59 @@ def measure_roi_at_tip_simple(
     }
 
 
-def _measure_image(im: IntensityImage, mask: MaskImage) -> dict[str, Any] | None:
+def measure_skeleton(
+    im: IntensityImage, skeleton: MaskImage, perpendicular_width: int, length: int
+) -> SkeletonMeasurement:
+    """Measure a region of interest around the tip of a root.
+
+    Parameters
+    ----------
+    im : IntensityImage
+        Image data.
+    mask : MaskImage
+        Binary mask of the root.
+    um_per_pixel : float
+
+    Returns
+    -------
+    RoiMeasurement
+        Measurements of the tip region.
+    """
+
+    assert np.sum(skeleton) > 0, "No points in the skeleton"
+    results = skeleton_utils.get_ordered_perpendicular_profiles(
+        im, skeleton, perpendicular_width
+    )
+    assert len(results) > 0, "No points in perpendicular profiles"
+
+    coordinates = np.asarray(
+        [result["coordinates"] for result in results], dtype=np.int64
+    )
+
+    assert coordinates.ndim == 2, f"Expected 2d, found {coordinates.ndim}"
+    assert coordinates.shape[1] == 2, (
+        f"Expected shape [_, 2], found {coordinates.shape}"
+    )
+
+    intensities = np.asarray([np.sum(result["intensities"]) for result in results])
+
+    last_argmax = len(intensities) - np.argmax(intensities[::-1]) - 1
+
+    distance_to_max = np.linalg.norm(coordinates - coordinates[last_argmax, :], axis=1)
+
+    sel = np.abs(distance_to_max <= length)
+
+    return {
+        "intensities": intensities,
+        "intensity": float(np.sum(intensities[sel])),
+        "pixel_count": np.sum(sel),
+        "_coordinates": coordinates,  # [sel, :],
+    }
+
+
+def _measure_image(
+    im: IntensityImage, mask: MaskImage, skeleton: MaskImage
+) -> dict[str, Any] | None:
     """Measure features of the largest root in an image.
 
     Parameters
@@ -205,16 +264,31 @@ def _measure_image(im: IntensityImage, mask: MaskImage) -> dict[str, Any] | None
 
     assert _types.is_mask_image(root_mask), "Not a mask image"
 
+    conf: dict[str, int] = dict(
+        box=680,
+        perpendicular_width=3,
+        length=10,
+    )
+
     if max(im.shape) > 1000:
-        # Probably a 1x
-        box = 750
-    else:
         # Probably a 8x
-        box = 85
+        pass
+    else:
+        # Probably a 1x
+        conf = {k: int(v / 8) for k, v in conf.items()}
 
     return {
-        **prefix_keys("tip_", measure_roi_at_tip_simple(im, root_mask, box)),
+        **prefix_keys("tip_", measure_roi_at_tip_simple(im, root_mask, conf["box"])),
         **prefix_keys("full_", measure_roi(im, root_mask)),
+        **prefix_keys(
+            "skel_",
+            measure_skeleton(
+                im,
+                np.logical_and(skeleton, root_mask),
+                conf["perpendicular_width"],
+                conf["length"],
+            ),
+        ),
     }
 
 
@@ -232,4 +306,21 @@ def measure_image(path: pathlib.Path) -> dict[str, Any] | None:
         assert _types.is_mask_image(mask), "Not a mask image"
         skio.imsave(mask_path, mask.astype(np.uint8) * 255, check_contrast=False)
 
-    return _measure_image(im, mask)
+    skeleton_path = io.build_skeleton_path(path)
+    if skeleton_path.exists():
+        skeleton = skio.imread(skeleton_path) > 0  # type: ignore
+        assert _types.is_mask_image(skeleton), "Not a mask image"
+    else:
+        from .immultiroot import find_center_line
+
+        skeleton_path.parent.mkdir(parents=True, exist_ok=True)
+        skeleton_coords = find_center_line(mask)
+        skeleton = np.zeros_like(mask)
+        skeleton[
+            skeleton_coords[:, 0].astype(int), skeleton_coords[:, 1].astype(int)
+        ] = True
+        skio.imsave(
+            skeleton_path, skeleton.astype(np.uint8) * 255, check_contrast=False
+        )
+
+    return _measure_image(im, mask, skeleton)

@@ -12,8 +12,13 @@ import pandas as pd
 import skimage.io as skio
 from seaborn import objects as so
 from seaborn import axes_style
+from matplotlib.colors import ListedColormap, BoundaryNorm
+
 
 from . import io
+
+CMAP3 = ListedColormap(["black", "gray", "cyan"])
+NORM_CMAP3 = BoundaryNorm([0, 1, 2, 3], CMAP3.N)
 
 
 TAB10_COLORS = [
@@ -679,10 +684,25 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
                 )
                 mask = np.zeros(im.shape, dtype=np.bool_)
 
+            try:
+                skeleton_mask = io.read(io.build_skeleton_path(record["path"]))
+            except FileNotFoundError as ex:
+                io.logger.error(
+                    f"No skeleton mask found for {record['path']} at {io.build_skeleton_path(record['path'])}: {ex}"
+                )
+                skeleton_mask = np.zeros(im.shape, dtype=np.bool_)
+
             ax.axis(True)
             ax.set_xticks([])
             ax.set_yticks([])
-            ax.imshow(mask, cmap="gray")
+
+            ax.imshow(
+                1 * mask / mask.max() + 1 * skeleton_mask / skeleton_mask.max(),
+                cmap=CMAP3,
+                norm=NORM_CMAP3,
+                interpolation="none",
+            )
+            # ax.set_title(f"{np.count_nonzero(mask)}\n{np.count_nonzero(skeleton_mask)}", fontsize=4)
             if record["tip_position"]:
                 ax.add_patch(
                     get_rectangle_from_box(
@@ -693,3 +713,55 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
                         facecolor="none",
                     )
                 )
+
+    with pdf_figure(
+        pdf_writer,
+        2 * nrows,
+        ncols,
+        ax_style="off",
+        height_fraction=1,
+        # height_fraction=297/210*nrows/ncols,
+        layout="constrained",
+    ) as (fig, axs):
+        fig.suptitle(title, size="small")
+        for _name, record in date_df.iterrows():
+            row, col = record["row"], record["col"]
+            ax: Axes = axs[2 * row - 2][col - 1]
+
+            try:
+                im = io.read(record["path"])
+            except FileNotFoundError as ex:
+                io.logger.error(f"Could not read image {record['path']}: {ex}")
+                ax.axis(False)
+                axs[2 * row - 1][col - 1].axis(False)
+                continue
+
+            ax.axis(True)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            ax.text(
+                0.02,
+                0.98,
+                record["plant_id_in_gt"],
+                transform=ax.transAxes,  # Coordinates relative to Axes (0 to 1)
+                fontsize=5,
+                color="white",
+                ha="left",
+                va="top",
+            )
+
+            if genotypes:
+                colorize_axes(
+                    ax, TAB10_COLORS[genotypes.index(record["genotype"])], width=1.5
+                )
+
+            if row == 1:
+                ax.set_title(col, fontsize="xx-small")
+            if col == 1:
+                ax.set_ylabel(row, fontsize="xx-small")
+
+            ax.plot(record["skel_intensities"])
+
+            # mask
+            ax: Axes = axs[2 * row - 1][col - 1]

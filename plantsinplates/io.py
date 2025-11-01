@@ -35,6 +35,24 @@ def build_mask_path(image_path: pathlib.Path) -> pathlib.Path:
     return mask_path
 
 
+def build_skeleton_path(image_path: pathlib.Path) -> pathlib.Path:
+    """Build standardized skeleton path from the provided image path.
+
+    Parameters
+    ----------
+    image_path : pathlib.Path
+        Path to the original image file.
+
+    Returns
+    -------
+    pathlib.Path
+        Path where the corresponding skeleton file should be stored.
+    """
+    skeleton_folder = image_path.parent / f"{PREFIX}skeleton"
+    skeleton_path = skeleton_folder / (image_path.stem + ".png")
+    return skeleton_path
+
+
 def build_preflight_path(folder: pathlib.Path) -> pathlib.Path:
     """Build standardized preflight data path for the given folder.
 

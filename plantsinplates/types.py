@@ -6,6 +6,7 @@ import numpy as np
 type MaskImage = np.ndarray[tuple[int, int], np.dtype[np.bool]]
 type LabeledImage = np.ndarray[tuple[int, int], np.dtype[np.integer]]
 type IntensityImage = np.ndarray[tuple[int, int], np.dtype[np.integer]]
+type IntCoodArray = np.ndarray[tuple[int, Literal[2]], np.dtype[np.integer]]
 type FloatCoodArray = np.ndarray[tuple[int, Literal[2]], np.dtype[np.floating]]
 type FloatVector = np.ndarray[tuple[int, ...], np.dtype[np.floating]]
 
@@ -51,3 +52,15 @@ class RoiMeasurement(TypedDict):
     fg_count: int
     position: tuple[Float, Float] | tuple[int, int] | None
     box: tuple[int, int] | None
+
+
+class PerpendicularProfile(TypedDict):
+    coordinates: tuple[int, int]
+    intensities: FloatVector
+
+
+class SkeletonMeasurement(TypedDict):
+    intensities: FloatVector
+    intensity: float
+    pixel_count: int
+    _coordinates: IntCoodArray

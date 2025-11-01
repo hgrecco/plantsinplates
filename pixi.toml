@@ -9,6 +9,7 @@ version = "0.1.0"
 show-version = "python plantsinplates-app version"
 gui = "python plantsinplates-app gui"
 gui-dev = "python __main__.py gui"
+test = "python __main__.py test"
 
 build = "python -m zipfile -c plantsinplates-app __main__.py pixi.toml pixi.lock plantsinplates"
 upload = "scp plantsinplates-app df:/home/hgrecco/html/pkg"
