@@ -1,6 +1,7 @@
 import contextlib
 from typing import Generator, Literal, Any
 import datetime
+import textwrap
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
@@ -348,6 +349,43 @@ def seaborn_plot(
             .on(fig)
             .plot(pyplot=True)
         )
+
+
+def generate_analysis_details_page(
+    pdf_writer: PdfPages,
+    details: list[tuple[str, str]],
+    *,
+    title: str = "Analysis details",
+):
+    """Generate a PDF page with analysis details and configuration."""
+
+    lines: list[str] = []
+    for key, value in details:
+        wrapped = textwrap.wrap(
+            f"{key}: {value}",
+            width=112,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        if wrapped:
+            lines.extend(wrapped)
+        else:
+            lines.append(f"{key}:")
+
+    with pdf_figure(pdf_writer, 1, 1, ax_style="off", layout="none") as (fig, axs):
+        ax = axs if isinstance(axs, Axes) else axs.flatten()[0]
+        ax.axis(False)
+        fig.suptitle(title, size="medium")
+        ax.text(
+            0.03,
+            0.95,
+            "\n".join(lines),
+            ha="left",
+            va="top",
+            fontsize=9,
+            family="monospace",
+        )
+        default_footnote(fig)
 
 
 def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):

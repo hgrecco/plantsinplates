@@ -1,6 +1,7 @@
 import pickle
 from typing import Any, Literal
 import pathlib
+import json
 from decimal import Decimal
 from fractions import Fraction
 
@@ -51,6 +52,58 @@ def day_number(days: Decimal, min_level: Literal["h", "m"] | None = None) -> str
 
     current += f"{int_minutes:02d}m"
     return current
+
+
+def summarize_unique_values(
+    df: pd.DataFrame, column: str, *, max_items: int = 6
+) -> str:
+    """Summarize unique values in a column as count + preview."""
+    if column not in df.columns:
+        return "n/a"
+
+    values = sorted(df[column].dropna().astype(str).unique().tolist())
+    if not values:
+        return "0"
+
+    preview = ", ".join(values[:max_items])
+    if len(values) > max_items:
+        preview += f", ... (+{len(values) - max_items} more)"
+
+    return f"{len(values)} ({preview})"
+
+
+def build_analysis_details(
+    analysis_type: Literal["experiment", "plate"],
+    analysis_path: pathlib.Path,
+    pdf_path: pathlib.Path,
+    df: pd.DataFrame,
+    measurement_config: MeasurementConfig,
+    *,
+    dataframe_source: Literal["computed", "cache", "merged"] = "computed",
+) -> list[tuple[str, str]]:
+    """Build analysis metadata shared by logs and PDF details page."""
+    return [
+        ("Analysis type", analysis_type),
+        ("Analysis path", str(analysis_path)),
+        ("Dataframe source", dataframe_source),
+        ("Rows analyzed", str(len(df))),
+        ("Measurement method", measurement_config.method),
+        (
+            "Measurement config",
+            json.dumps(measurement_config.to_dict(), sort_keys=True),
+        ),
+        ("Plates", summarize_unique_values(df, "plate")),
+        ("Dates", summarize_unique_values(df, "date")),
+        ("Genotypes", summarize_unique_values(df, "genotype")),
+        ("Output PDF", str(pdf_path)),
+    ]
+
+
+def log_analysis_details(details: list[tuple[str, str]]) -> None:
+    """Log analysis metadata to the UI/file log."""
+    io.logger.info("Analysis details:")
+    for key, value in details:
+        io.logger.info(f"  {key}: {value}")
 
 
 def diff(
@@ -345,8 +398,20 @@ def analyze_experiment_folder(
 
         # Generate a summary PDF for the experiment
         pdf_file = io.build_summary_pdf_path(experiment_path)
+        details = build_analysis_details(
+            "experiment",
+            experiment_path,
+            pdf_file,
+            df,
+            measurement_config,
+            dataframe_source="merged",
+        )
+        log_analysis_details(details)
         io.logger.info("Generating visualization")
         with PdfPages(pdf_file) as pdf:
+            visualize.generate_analysis_details_page(
+                pdf, details, title="Analysis details - Experiment"
+            )
             visualize.generate_experimentview(pdf, df)
             io.logger.info(f"Saved experiment summary to {pdf_file}")
 
@@ -494,9 +559,23 @@ def analyze_plate_folder(
 
     pdf_file = io.build_summary_pdf_path(plate_dir)
     if (not pdf_file.exists()) or (not use_cached_dataframe):
+        details = build_analysis_details(
+            "plate",
+            plate_dir,
+            pdf_file,
+            df,
+            measurement_config,
+            dataframe_source="cache" if use_cached_dataframe else "computed",
+        )
+        log_analysis_details(details)
         io.logger.info("Generating visualization")
         with PdfPages(pdf_file) as pdf:
             try:
+                visualize.generate_analysis_details_page(
+                    pdf,
+                    details,
+                    title=f"Analysis details - Plate {df['plate'].iloc[0]}",
+                )
                 visualize.generate_plateview(
                     pdf, df, measurement_method=measurement_config.method
                 )
