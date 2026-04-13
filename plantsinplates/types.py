@@ -49,7 +49,7 @@ class RoiMeasurement(TypedDict):
     fg_count: int
     bg_mean: Float
     bg_std: Float
-    fg_count: int
+    bg_count: int
     position: tuple[Float, Float] | tuple[int, int] | None
     box: tuple[int, int] | None
 

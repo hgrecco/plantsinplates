@@ -288,6 +288,7 @@ def measure_roi(im: IntensityImage, mask: MaskImage) -> RoiMeasurement:
         "fg_count": np.sum(mask, initial=0).astype(int),
         "bg_mean": np.mean(im[~mask]),
         "bg_std": np.std(im[~mask]),
+        "bg_count": np.sum(~mask, initial=0).astype(int),
         "box": None,
         "tip": None,
     }
