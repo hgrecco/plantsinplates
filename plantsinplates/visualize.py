@@ -10,6 +10,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import skimage.io as skio
+import skimage.morphology as skimorph
 from seaborn import objects as so
 from seaborn import axes_style
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -276,6 +277,32 @@ def axes_as_2d(axs: Axes, nrows: int, ncols: int) -> np.ndarray:
     if ncols == 1:
         return np.array([[ax] for ax in axs])
     return axs
+
+
+def extract_centerline_coords(
+    record: pd.Series, skeleton_mask: np.ndarray
+) -> np.ndarray:
+    if "skel__coordinates" in record and isinstance(
+        record["skel__coordinates"], np.ndarray
+    ):
+        coords = record["skel__coordinates"]
+        if coords.ndim == 2 and coords.shape[1] == 2 and len(coords) > 0:
+            return coords
+
+    rows, cols = np.where(skeleton_mask > 0)
+    if len(rows) == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    order = np.argsort(rows)
+    return np.column_stack((rows[order], cols[order]))
+
+
+def centerline_mask_style(df: pd.DataFrame) -> tuple[int, float]:
+    config = df.attrs.get("measurement_config", {})
+    perpendicular_width = int(config.get("perpendicular_width", 1))
+    # Match measurement semantics: profiles use half_width = perpendicular_width // 2.
+    dilation_radius = max(0, perpendicular_width // 2)
+    alpha = 0.6
+    return dilation_radius, alpha
 
 
 def relabel(s: str) -> str:
@@ -557,8 +584,15 @@ def generate_plateview(
             .plot()
         )
 
+    centerline_dilation_radius, centerline_alpha = centerline_mask_style(plate_df)
     for ndx, (date, gdf) in enumerate(plate_df.groupby("date")):
-        generate_dateview(pdf_writer, gdf, measurement_method=measurement_method)
+        generate_dateview(
+            pdf_writer,
+            gdf,
+            measurement_method=measurement_method,
+            centerline_dilation_radius=centerline_dilation_radius,
+            centerline_alpha=centerline_alpha,
+        )
 
     #################
     # y-categoricals
@@ -630,6 +664,8 @@ def generate_dateview(
     date_df: pd.DataFrame,
     *,
     measurement_method: Literal["box", "centerline"] = "box",
+    centerline_dilation_radius: int = 0,
+    centerline_alpha: float = 0.6,
 ):
     """Generate a page showing images and masks for a specific date.
 
@@ -661,26 +697,26 @@ def generate_dateview(
         fig.suptitle(title, size="small")
         for _name, record in date_df.iterrows():
             row, col = record["row"], record["col"]
-            ax: Axes = axs[2 * row - 2][col - 1]
+            ax_image: Axes = axs[2 * row - 2][col - 1]
 
             try:
                 im = io.read(record["path"])
             except FileNotFoundError as ex:
                 io.logger.error(f"Could not read image {record['path']}: {ex}")
-                ax.axis(False)
+                ax_image.axis(False)
                 axs[2 * row - 1][col - 1].axis(False)
                 continue
 
-            ax.axis(True)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.imshow(im, cmap="gray")
+            ax_image.axis(True)
+            ax_image.set_xticks([])
+            ax_image.set_yticks([])
+            ax_image.imshow(im, cmap="gray")
 
-            ax.text(
+            ax_image.text(
                 0.02,
                 0.98,
                 record["plant_id_in_gt"],
-                transform=ax.transAxes,  # Coordinates relative to Axes (0 to 1)
+                transform=ax_image.transAxes,  # Coordinates relative to Axes (0 to 1)
                 fontsize=5,
                 color="white",
                 ha="left",
@@ -689,16 +725,18 @@ def generate_dateview(
 
             if genotypes:
                 colorize_axes(
-                    ax, TAB10_COLORS[genotypes.index(record["genotype"])], width=1.5
+                    ax_image,
+                    TAB10_COLORS[genotypes.index(record["genotype"])],
+                    width=1.5,
                 )
 
             if row == 1:
-                ax.set_title(col, fontsize="xx-small")
+                ax_image.set_title(col, fontsize="xx-small")
             if col == 1:
-                ax.set_ylabel(row, fontsize="xx-small")
+                ax_image.set_ylabel(row, fontsize="xx-small")
 
             # mask
-            ax: Axes = axs[2 * row - 1][col - 1]
+            ax_mask: Axes = axs[2 * row - 1][col - 1]
             try:
                 mask = io.read(io.build_mask_path(record["path"]))
             except FileNotFoundError as ex:
@@ -715,11 +753,11 @@ def generate_dateview(
                 )
                 skeleton_mask = np.zeros(im.shape, dtype=np.bool_)
 
-            ax.axis(True)
-            ax.set_xticks([])
-            ax.set_yticks([])
+            ax_mask.axis(True)
+            ax_mask.set_xticks([])
+            ax_mask.set_yticks([])
 
-            ax.imshow(
+            ax_mask.imshow(
                 1 * mask / mask.max() + 1 * skeleton_mask / skeleton_mask.max(),
                 cmap=CMAP3,
                 norm=NORM_CMAP3,
@@ -732,7 +770,7 @@ def generate_dateview(
                 and "tip_box" in date_df.columns
                 and record["tip_position"]
             ):
-                ax.add_patch(
+                ax_mask.add_patch(
                     get_rectangle_from_box(
                         record["tip_position"],
                         record["tip_box"],
@@ -741,6 +779,27 @@ def generate_dateview(
                         facecolor="none",
                     )
                 )
+            elif measurement_method == "centerline":
+                centerline_coords = extract_centerline_coords(record, skeleton_mask)
+                if len(centerline_coords) > 0:
+                    centerline_mask = np.zeros_like(skeleton_mask, dtype=np.bool_)
+                    coords = centerline_coords.astype(np.int64)
+                    rows = np.clip(coords[:, 0], 0, centerline_mask.shape[0] - 1)
+                    cols = np.clip(coords[:, 1], 0, centerline_mask.shape[1] - 1)
+                    centerline_mask[rows, cols] = True
+
+                    if centerline_dilation_radius > 0:
+                        centerline_mask = skimorph.binary_dilation(
+                            centerline_mask,
+                            skimorph.disk(centerline_dilation_radius),
+                        )
+
+                    overlay = np.zeros((*centerline_mask.shape, 4), dtype=np.float32)
+                    overlay[..., 0] = 1.0  # red
+                    overlay[..., 3] = (
+                        centerline_mask.astype(np.float32) * centerline_alpha
+                    )
+                    ax_image.imshow(overlay, interpolation="none")
 
     if measurement_method != "centerline" or "skel_intensities" not in date_df.columns:
         return
