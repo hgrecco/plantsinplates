@@ -10,6 +10,7 @@ import pandas as pd
 
 from . import io
 from . import imsingleroot
+from .measurement_config import MeasurementConfig
 from . import visualize
 
 THRESHOLD = 100
@@ -164,7 +165,9 @@ def prepare_info(
     long_df["fluo"] = long_df["fluo"].replace(np.nan, pd.NA)
 
     long_df["fluo"] = long_df["fluo"].map(
-        lambda x: str(pathlib.Path(pathlib.PurePosixPath(x).as_posix()))
+        lambda x: x
+        if pd.isna(x)
+        else str(pathlib.Path(pathlib.PurePosixPath(str(x)).as_posix()))
     )
 
     return long_df
@@ -265,7 +268,10 @@ def preflight_date(date_dir: pathlib.Path, long_df: pd.DataFrame) -> dict[str, A
     }
 
 
-def measure_plate(preflight_dict: dict[str, Any]) -> list[dict[Any, Any]]:
+def measure_plate(
+    preflight_dict: dict[str, Any],
+    measurement_config: MeasurementConfig = MeasurementConfig(),
+) -> list[dict[Any, Any]]:
     """Measure all valid root images for a plate.
 
     Parameters
@@ -283,7 +289,9 @@ def measure_plate(preflight_dict: dict[str, Any]) -> list[dict[Any, Any]]:
         for _name, fluo_record in date_record["fluos"].items():
             try:
                 io.logger.info(f"Analyzing {fluo_record['path']}")
-                rec = imsingleroot.measure_image(fluo_record["path"])
+                rec = imsingleroot.measure_image(
+                    fluo_record["path"], measurement_config=measurement_config
+                )
             except Exception as ex:
                 io.logger.error(f"Could not measure {fluo_record['path']}: {ex}")
                 rec = None
@@ -299,7 +307,10 @@ def measure_plate(preflight_dict: dict[str, Any]) -> list[dict[Any, Any]]:
     return records
 
 
-def analyze_experiment_folder(experiment_path: pathlib.Path) -> None | pathlib.Path:
+def analyze_experiment_folder(
+    experiment_path: pathlib.Path,
+    measurement_config: MeasurementConfig = MeasurementConfig(),
+) -> None | pathlib.Path:
     """Analyze all plates in an experiment folder.
 
     Parameters
@@ -312,7 +323,9 @@ def analyze_experiment_folder(experiment_path: pathlib.Path) -> None | pathlib.P
     for plate_dir in sorted(experiment_path.glob("plate_*")):
         if not plate_dir.is_dir():
             continue
-        df_paths.append(analyze_plate_folder(plate_dir))
+        df_paths.append(
+            analyze_plate_folder(plate_dir, measurement_config=measurement_config)
+        )
 
     df_paths = [df_path for df_path in df_paths if df_path is not None]
 
@@ -322,6 +335,8 @@ def analyze_experiment_folder(experiment_path: pathlib.Path) -> None | pathlib.P
             [pd.read_pickle(df_path) for df_path in df_paths], ignore_index=True
         )
         df.sort_values(["plate", "date", "genotype", "row", "col"], inplace=True)
+        df.attrs["measurement_method"] = measurement_config.method
+        df.attrs["measurement_config"] = measurement_config.to_dict()
 
         # Save the merged dataframe
         merged_df_path = io.build_dataframe_path(experiment_path)
@@ -330,16 +345,18 @@ def analyze_experiment_folder(experiment_path: pathlib.Path) -> None | pathlib.P
 
         # Generate a summary PDF for the experiment
         pdf_file = io.build_summary_pdf_path(experiment_path)
-        if not pdf_file.exists():
-            io.logger.info("Generating visualization")
-            with PdfPages(pdf_file) as pdf:
-                visualize.generate_experimentview(pdf, df)
-                io.logger.info(f"Saved experiment summary to {pdf_file}")
+        io.logger.info("Generating visualization")
+        with PdfPages(pdf_file) as pdf:
+            visualize.generate_experimentview(pdf, df)
+            io.logger.info(f"Saved experiment summary to {pdf_file}")
 
     io.logger.info(f"Finished analyzing experiment folder: {experiment_path.name}")
 
 
-def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
+def analyze_plate_folder(
+    plate_dir: pathlib.Path,
+    measurement_config: MeasurementConfig = MeasurementConfig(),
+) -> None | pathlib.Path:
     """Analyze a plate folder: preflight, measure, save results and summary.
 
     Parameters
@@ -371,19 +388,32 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
         pickle.dump(preflight_dict, open(preflight_path, "wb"))
 
     df_path = io.build_dataframe_path(plate_dir)
+    use_cached_dataframe = False
     if df_path.exists():
         io.logger.info("Loading existing dataframe from cache")
         df = pd.read_pickle(df_path)
-    else:
-        records = measure_plate(preflight_dict)
+        cached_config = df.attrs.get("measurement_config", None)
+        if cached_config == measurement_config.to_dict():
+            use_cached_dataframe = True
+        else:
+            io.logger.info(
+                "Cached dataframe was created with a different measurement configuration. Recomputing."
+            )
+
+    if not use_cached_dataframe:
+        records = measure_plate(preflight_dict, measurement_config=measurement_config)
         df = pd.DataFrame.from_records(records)
 
-        df.attrs["overview_path"] = {
-            date: pdd["overview_path"] for date, pdd in preflight_dict["dates"].items()
-        }
+        if len(df) == 0:
+            io.logger.error("No images could be measured for this plate.")
+            return
+
         df["plate"] = preflight_dict["plate"]
 
-        df["tip_mean_intensity"] = df["tip_fg_mean"] - df["tip_bg_mean"]
+        if measurement_config.method == "box":
+            df["signal_intensity"] = df["tip_fg_mean"] - df["tip_bg_mean"]
+        else:
+            df["signal_intensity"] = df["skel_intensity"]
 
         df["date_float"] = df["date"].map(date_to_float)
         df["delta_date_from_min"] = df["date_float"] - df["date_float"].min()
@@ -417,8 +447,8 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
 
         df.sort_values(["date_float", "genotype", "row", "col"], inplace=True)
 
-        df["delta_tip_mean_intensity"] = df.groupby(["plate", "row", "col"])[
-            "tip_mean_intensity"
+        df["delta_signal_intensity"] = df.groupby(["plate", "row", "col"])[
+            "signal_intensity"
         ].transform(lambda x: x.diff())
         df["delta_length"] = df.groupby(["plate", "row", "col"])["length"].transform(
             lambda x: x.diff()
@@ -427,30 +457,49 @@ def analyze_plate_folder(plate_dir: pathlib.Path) -> None | pathlib.Path:
             "delta_date_from_min"
         ].transform(lambda x: x.diff())
 
-        df["avg_tip_mean_intensity"] = df.groupby(["plate", "row", "col"])[
-            "tip_mean_intensity"
+        df["avg_signal_intensity"] = df.groupby(["plate", "row", "col"])[
+            "signal_intensity"
         ].transform(lambda x: x.rolling(2).mean())
 
         df["delta_length_per_day"] = df["delta_length"] / df["delta_date"]
-        df["delta_tip_mean_intensity_per_day"] = (
-            df["delta_tip_mean_intensity"] / df["delta_date"]
+        df["delta_signal_intensity_per_day"] = (
+            df["delta_signal_intensity"] / df["delta_date"]
         )
 
         df["plant_id_in_gt"] = df.groupby(["plate", "date", "genotype"]).cumcount()
         df["plant_id_in_gt"] = (df["plant_id_in_gt"] + 1).astype(str)
 
+        df.attrs["measurement_method"] = measurement_config.method
+        df.attrs["measurement_config"] = measurement_config.to_dict()
+        df.attrs["overview_path"] = {
+            date: pdd["overview_path"] for date, pdd in preflight_dict["dates"].items()
+        }
+
         df.to_pickle(df_path)
+        io.logger.info(f"Saved dataframe to {df_path}")
 
         xls_file = io.build_summary_excel_path(plate_dir)
         df.to_excel(xls_file, index=False)
         io.logger.info(f"Saved dataframe to {xls_file}")
+    else:
+        if "measurement_method" not in df.attrs:
+            df.attrs["measurement_method"] = measurement_config.method
+        if "measurement_config" not in df.attrs:
+            df.attrs["measurement_config"] = measurement_config.to_dict()
+        if "overview_path" not in df.attrs:
+            df.attrs["overview_path"] = {
+                date: pdd["overview_path"]
+                for date, pdd in preflight_dict["dates"].items()
+            }
 
     pdf_file = io.build_summary_pdf_path(plate_dir)
-    if not pdf_file.exists():
+    if (not pdf_file.exists()) or (not use_cached_dataframe):
         io.logger.info("Generating visualization")
         with PdfPages(pdf_file) as pdf:
             try:
-                visualize.generate_plateview(pdf, df)
+                visualize.generate_plateview(
+                    pdf, df, measurement_method=measurement_config.method
+                )
                 io.logger.info(f"Saved summary to {pdf_file}")
             except Exception as ex:
                 io.logger.error(f"Error while visualizing plate {plate_dir.name}: {ex}")

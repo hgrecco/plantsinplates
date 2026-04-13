@@ -193,7 +193,17 @@ def find_center_line(
         Center line coordinates.
     """
     x, y = interpolate_line(mask, axis)
-    ys = savgol_filter(y, savgol_window, 5)
+    if len(y) <= 5:
+        return np.column_stack((x, y))
+
+    # Savitzky-Golay requires an odd window length greater than polyorder (5).
+    window = min(savgol_window, len(y))
+    if window % 2 == 0:
+        window -= 1
+    if window <= 5:
+        return np.column_stack((x, y))
+
+    ys = savgol_filter(y, window, 5)
     return np.column_stack((x, ys))
 
 

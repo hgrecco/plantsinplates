@@ -268,15 +268,27 @@ def colorize_axes(ax: Axes, color: str, width: int | float = 2):
         spine.set_linewidth(width)
 
 
+def axes_as_2d(axs: Axes, nrows: int, ncols: int) -> np.ndarray:
+    if nrows == 1 and ncols == 1:
+        return np.array([[axs]])
+    if nrows == 1:
+        return np.array([axs])
+    if ncols == 1:
+        return np.array([[ax] for ax in axs])
+    return axs
+
+
 def relabel(s: str) -> str:
     if s == "length":
         return "length [mm]"
     if s == "delta_length_per_day":
         return "growth [mm/day]"
-    if s == "delta_tip_mean_intensity_per_day":
-        return "tip mean intensity change [1/day]"
-    if s == "tip_mean_intensity":
-        return "tip mean intensity"
+    if s == "delta_signal_intensity_per_day":
+        return "signal intensity change [1/day]"
+    if s == "signal_intensity":
+        return "signal intensity"
+    if s == "avg_signal_intensity":
+        return "average signal intensity"
     if s == "day_number":
         return "day"
     if s == "plant_id_in_gt":
@@ -387,7 +399,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         pdf_writer,
         dict(
             data=experiment_df,
-            x="tip_mean_intensity",
+            x="signal_intensity",
             y="day_number",
             color="genotype",
         ),
@@ -397,7 +409,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         pdf_writer,
         dict(
             data=experiment_df,
-            x="delta_tip_mean_intensity_per_day",
+            x="delta_signal_intensity_per_day",
             y="day_number",
             color="genotype",
         ),
@@ -412,7 +424,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         pdf_writer,
         dict(
             data=experiment_df,
-            x="tip_mean_intensity",
+            x="signal_intensity",
             y="length",
             color="genotype",
             alpha="day_number",
@@ -423,7 +435,7 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
         pdf_writer,
         dict(
             data=experiment_df,
-            x="delta_tip_mean_intensity_per_day",
+            x="delta_signal_intensity_per_day",
             y="delta_length_per_day",
             color="genotype",
             alpha="day_number",
@@ -432,7 +444,12 @@ def generate_experimentview(pdf_writer: PdfPages, experiment_df: pd.DataFrame):
     )
 
 
-def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
+def generate_plateview(
+    pdf_writer: PdfPages,
+    plate_df: pd.DataFrame,
+    *,
+    measurement_method: Literal["box", "centerline"] = "box",
+):
     """Generate a multi-page PDF with plate overview and summary plots.
 
     Parameters
@@ -541,7 +558,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
         )
 
     for ndx, (date, gdf) in enumerate(plate_df.groupby("date")):
-        generate_dateview(pdf_writer, gdf)
+        generate_dateview(pdf_writer, gdf, measurement_method=measurement_method)
 
     #################
     # y-categoricals
@@ -559,14 +576,14 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
     )
     seaborn_plot(
         pdf_writer,
-        dict(data=plate_df, x="tip_mean_intensity", y="day_number", color="genotype"),
+        dict(data=plate_df, x="signal_intensity", y="day_number", color="genotype"),
         dict(row="genotype"),
     )
     seaborn_plot(
         pdf_writer,
         dict(
             data=plate_df,
-            x="delta_tip_mean_intensity_per_day",
+            x="delta_signal_intensity_per_day",
             y="day_number",
             color="genotype",
         ),
@@ -580,7 +597,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
         pdf_writer,
         dict(
             data=plate_df,
-            x="tip_mean_intensity",
+            x="signal_intensity",
             y="length",
             color="genotype",
             alpha="day_number",
@@ -590,7 +607,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
         pdf_writer,
         dict(
             data=plate_df,
-            x="delta_tip_mean_intensity_per_day",
+            x="delta_signal_intensity_per_day",
             y="delta_length_per_day",
             color="genotype",
             alpha="day_number",
@@ -600,7 +617,7 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
         pdf_writer,
         dict(
             data=plate_df,
-            x="avg_tip_mean_intensity",
+            x="avg_signal_intensity",
             y="delta_length_per_day",
             color="genotype",
             alpha="day_number",
@@ -608,7 +625,12 @@ def generate_plateview(pdf_writer: PdfPages, plate_df: pd.DataFrame):
     )
 
 
-def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
+def generate_dateview(
+    pdf_writer: PdfPages,
+    date_df: pd.DataFrame,
+    *,
+    measurement_method: Literal["box", "centerline"] = "box",
+):
     """Generate a page showing images and masks for a specific date.
 
     Parameters
@@ -635,6 +657,7 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
         # height_fraction=297/210*nrows/ncols,
         layout="constrained",
     ) as (fig, axs):
+        axs = axes_as_2d(axs, 2 * nrows, ncols)
         fig.suptitle(title, size="small")
         for _name, record in date_df.iterrows():
             row, col = record["row"], record["col"]
@@ -703,7 +726,12 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
                 interpolation="none",
             )
             # ax.set_title(f"{np.count_nonzero(mask)}\n{np.count_nonzero(skeleton_mask)}", fontsize=4)
-            if record["tip_position"]:
+            if (
+                measurement_method == "box"
+                and "tip_position" in date_df.columns
+                and "tip_box" in date_df.columns
+                and record["tip_position"]
+            ):
                 ax.add_patch(
                     get_rectangle_from_box(
                         record["tip_position"],
@@ -714,15 +742,18 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
                     )
                 )
 
+    if measurement_method != "centerline" or "skel_intensities" not in date_df.columns:
+        return
+
     with pdf_figure(
         pdf_writer,
         2 * nrows,
         ncols,
         ax_style="off",
         height_fraction=1,
-        # height_fraction=297/210*nrows/ncols,
         layout="constrained",
     ) as (fig, axs):
+        axs = axes_as_2d(axs, 2 * nrows, ncols)
         fig.suptitle(title, size="small")
         for _name, record in date_df.iterrows():
             row, col = record["row"], record["col"]
@@ -744,7 +775,7 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
                 0.02,
                 0.98,
                 record["plant_id_in_gt"],
-                transform=ax.transAxes,  # Coordinates relative to Axes (0 to 1)
+                transform=ax.transAxes,
                 fontsize=5,
                 color="white",
                 ha="left",
@@ -763,5 +794,6 @@ def generate_dateview(pdf_writer: PdfPages, date_df: pd.DataFrame):
 
             ax.plot(record["skel_intensities"])
 
-            # mask
-            ax: Axes = axs[2 * row - 1][col - 1]
+            # Keep bottom row empty for the method-specific page layout.
+            ax = axs[2 * row - 1][col - 1]
+            ax.axis(False)
