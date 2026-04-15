@@ -142,6 +142,9 @@ class AnalyzeApp(tk.Tk):
         self.box_size_var = tk.StringVar(
             value=str(self.default_measurement_config.box_size)
         )
+        self.box_offset_var = tk.StringVar(
+            value=str(self.default_measurement_config.box_offset)
+        )
         self.perpendicular_width_var = tk.StringVar(
             value=str(self.default_measurement_config.perpendicular_width)
         )
@@ -173,6 +176,13 @@ class AnalyzeApp(tk.Tk):
             config_frame, textvariable=self.box_size_var, width=8
         )
         self.box_size_entry.grid(row=0, column=3, padx=5, pady=4, sticky=tk.W)
+
+        self.box_offset_label = ttk.Label(config_frame, text="Box offset [box]")
+        self.box_offset_label.grid(row=0, column=4, padx=5, pady=4, sticky=tk.W)
+        self.box_offset_entry = ttk.Entry(
+            config_frame, textvariable=self.box_offset_var, width=8
+        )
+        self.box_offset_entry.grid(row=0, column=5, padx=5, pady=4, sticky=tk.W)
 
         self.perpendicular_width_label = ttk.Label(
             config_frame, text="Perpendicular width [px]"
@@ -246,6 +256,9 @@ class AnalyzeApp(tk.Tk):
             self.box_size_label.grid()
             self.box_size_entry.grid()
             self.box_size_entry.configure(state=input_state)
+            self.box_offset_label.grid()
+            self.box_offset_entry.grid()
+            self.box_offset_entry.configure(state=input_state)
 
             self.perpendicular_width_label.grid_remove()
             self.perpendicular_width_entry.grid_remove()
@@ -256,6 +269,8 @@ class AnalyzeApp(tk.Tk):
         else:
             self.box_size_label.grid_remove()
             self.box_size_entry.grid_remove()
+            self.box_offset_label.grid_remove()
+            self.box_offset_entry.grid_remove()
 
             self.perpendicular_width_label.grid()
             self.perpendicular_width_entry.grid()
@@ -271,6 +286,7 @@ class AnalyzeApp(tk.Tk):
         return MeasurementConfig(
             method=self.method_var.get(),  # type: ignore[arg-type]
             box_size=int(self.box_size_var.get()),
+            box_offset=float(self.box_offset_var.get()),
             perpendicular_width=int(self.perpendicular_width_var.get()),
             length=int(self.length_var.get()),
             savgol_window=int(self.savgol_window_var.get()),
@@ -343,6 +359,7 @@ tapp = typer.Typer()
 def build_measurement_config(
     method: str,
     box_size: int,
+    box_offset: float,
     perpendicular_width: int,
     length: int,
     savgol_window: int,
@@ -351,6 +368,7 @@ def build_measurement_config(
         return MeasurementConfig(
             method=method,
             box_size=box_size,
+            box_offset=box_offset,
             perpendicular_width=perpendicular_width,
             length=length,
             savgol_window=savgol_window,
@@ -364,6 +382,13 @@ def gui(
     data_dir: Annotated[str, typer.Argument(envvar="DATA_DIR")] = "",
     method: Annotated[str, typer.Option("--method")] = "box",
     box_size: Annotated[int, typer.Option("--box-size")] = 680,
+    box_offset: Annotated[
+        float,
+        typer.Option(
+            "--box-offset",
+            help="Signed shift in box-size units (0=centered, +1=towards, -1=away)",
+        ),
+    ] = 0.0,
     perpendicular_width: Annotated[int, typer.Option("--perpendicular-width")] = 3,
     length: Annotated[int, typer.Option("--length")] = 10,
     savgol_window: Annotated[int, typer.Option("--savgol-window")] = 100,
@@ -376,6 +401,7 @@ def gui(
     measurement_config = build_measurement_config(
         method=method,
         box_size=box_size,
+        box_offset=box_offset,
         perpendicular_width=perpendicular_width,
         length=length,
         savgol_window=savgol_window,
@@ -416,6 +442,13 @@ def test(
     data_dir: Annotated[str, typer.Argument(envvar="DATA_DIR")] = "",
     method: Annotated[str, typer.Option("--method")] = "box",
     box_size: Annotated[int, typer.Option("--box-size")] = 680,
+    box_offset: Annotated[
+        float,
+        typer.Option(
+            "--box-offset",
+            help="Signed shift in box-size units (0=centered, +1=towards, -1=away)",
+        ),
+    ] = 0.0,
     perpendicular_width: Annotated[int, typer.Option("--perpendicular-width")] = 3,
     length: Annotated[int, typer.Option("--length")] = 10,
     savgol_window: Annotated[int, typer.Option("--savgol-window")] = 100,
@@ -423,6 +456,7 @@ def test(
     measurement_config = build_measurement_config(
         method=method,
         box_size=box_size,
+        box_offset=box_offset,
         perpendicular_width=perpendicular_width,
         length=length,
         savgol_window=savgol_window,

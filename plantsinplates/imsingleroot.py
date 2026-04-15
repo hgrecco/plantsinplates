@@ -143,8 +143,40 @@ def slice_around(center: int, width: int) -> slice:
     return slice(center - width // 2, center + (width - width // 2))
 
 
+def _shifted_box_center_from_tip(
+    tip: tuple[int, int],
+    box: tuple[int, int],
+    mask: MaskImage,
+    box_offset: float,
+) -> tuple[int, int]:
+    if box_offset == 0:
+        return tip
+
+    points = np.argwhere(mask)
+    if len(points) == 0:
+        return tip
+
+    centroid = np.mean(points, axis=0)
+    direction = np.asarray(tip, dtype=np.float64) - centroid
+    norm = np.linalg.norm(direction)
+    if norm <= 1e-9:
+        direction = np.asarray([1.0, 0.0], dtype=np.float64)
+    else:
+        direction = direction / norm
+
+    box_extent = abs(direction[0]) * float(box[0]) + abs(direction[1]) * float(box[1])
+    shift = direction * box_extent * box_offset
+    center = np.asarray(tip, dtype=np.float64) + shift
+
+    row, col = np.rint(center).astype(np.int64)
+    return int(row), int(col)
+
+
 def measure_roi_at_tip_simple(
-    im: IntensityImage, mask: MaskImage, box: int | tuple[int, int]
+    im: IntensityImage,
+    mask: MaskImage,
+    box: int | tuple[int, int],
+    box_offset: float = 0.0,
 ) -> RoiMeasurement:
     """Measure a region of interest around the tip of a root.
 
@@ -156,6 +188,10 @@ def measure_roi_at_tip_simple(
         Binary mask of the root.
     box : int or tuple[int, int]
         Size of the measurement box around the tip.
+    box_offset : float
+        Signed offset in box-size units.
+        0 centers at the tip, +1 shifts one box size towards the tip,
+        and -1 shifts one box size away from the tip.
 
     Returns
     -------
@@ -173,13 +209,14 @@ def measure_roi_at_tip_simple(
 
     tip0 = int(np.max(np.argwhere(widths)) - approx_width // 2)
     tip1 = int(np.argwhere(mask[tip0, :])[0][0])
+    position = _shifted_box_center_from_tip((tip0, tip1), box, mask, box_offset)
 
-    s0 = slice_around(tip0, box[0])
-    s1 = slice_around(tip1, box[1])
+    s0 = slice_around(position[0], box[0])
+    s1 = slice_around(position[1], box[1])
 
     return {
         **measure_roi(im[s0, s1], mask[s0, s1]),
-        "position": (tip0, tip1),
+        "position": position,
         "box": box,
     }
 
@@ -277,7 +314,12 @@ def _measure_image(
         return {
             **prefix_keys(
                 "tip_",
-                measure_roi_at_tip_simple(im, root_mask, measurement_config.box_size),
+                measure_roi_at_tip_simple(
+                    im,
+                    root_mask,
+                    measurement_config.box_size,
+                    measurement_config.box_offset,
+                ),
             ),
             **prefix_keys("full_", measure_roi(im, root_mask)),
         }

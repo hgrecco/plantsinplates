@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass
+from math import isfinite
 from typing import Literal
 
 type MeasurementMethod = Literal["box", "centerline"]
@@ -8,6 +9,7 @@ type MeasurementMethod = Literal["box", "centerline"]
 class MeasurementConfig:
     method: MeasurementMethod = "box"
     box_size: int = 680
+    box_offset: float = 0.0
     perpendicular_width: int = 3
     length: int = 10
     savgol_window: int = 100
@@ -19,6 +21,9 @@ class MeasurementConfig:
         if self.box_size <= 0:
             raise ValueError("box_size must be > 0")
 
+        if not isfinite(self.box_offset):
+            raise ValueError("box_offset must be finite")
+
         if self.perpendicular_width <= 0:
             raise ValueError("perpendicular_width must be > 0")
 
@@ -28,5 +33,5 @@ class MeasurementConfig:
         if self.savgol_window <= 0:
             raise ValueError("savgol_window must be > 0")
 
-    def to_dict(self) -> dict[str, int | str]:
+    def to_dict(self) -> dict[str, int | float | str]:
         return asdict(self)

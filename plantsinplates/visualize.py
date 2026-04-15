@@ -795,8 +795,12 @@ def generate_dateview(
             ax_mask.set_xticks([])
             ax_mask.set_yticks([])
 
+            mask_layer = (mask > 0).astype(np.uint8)
+            skeleton_layer = (skeleton_mask > 0).astype(np.uint8)
+            combined_mask = mask_layer + skeleton_layer
+
             ax_mask.imshow(
-                1 * mask / mask.max() + 1 * skeleton_mask / skeleton_mask.max(),
+                combined_mask,
                 cmap=CMAP3,
                 norm=NORM_CMAP3,
                 interpolation="none",
