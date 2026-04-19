@@ -10,9 +10,10 @@ class MeasurementConfig:
     method: MeasurementMethod = "box"
     box_size: int = 680
     box_offset: float = 0.0
-    perpendicular_width: int = 3
-    length: int = 10
-    savgol_window: int = 100
+    perpendicular_width: int = 50
+    length: int = 50
+    savgol_window: int = 25
+    intensity_savgol_window: int = 25
 
     def __post_init__(self):
         if self.method not in ("box", "centerline"):
@@ -32,6 +33,9 @@ class MeasurementConfig:
 
         if self.savgol_window <= 0:
             raise ValueError("savgol_window must be > 0")
+
+        if self.intensity_savgol_window < 0:
+            raise ValueError("intensity_savgol_window must be >= 0")
 
     def to_dict(self) -> dict[str, int | float | str]:
         return asdict(self)

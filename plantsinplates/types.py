@@ -64,3 +64,24 @@ class SkeletonMeasurement(TypedDict):
     intensity: float
     pixel_count: int
     _coordinates: IntCoodArray
+    cap_present: bool
+    cap_start_idx: int
+    cap_end_idx: int
+    cap_mean: float
+    cap_integrated: float
+    cap_count: int
+    tip_start_idx: int
+    tip_end_idx: int
+    tip_mean: float
+    tip_integrated: float
+    tip_count: int
+    middle_start_idx: int
+    middle_end_idx: int
+    middle_mean: float
+    middle_integrated: float
+    middle_count: int
+    far_start_idx: int
+    far_end_idx: int
+    far_mean: float
+    far_integrated: float
+    far_count: int

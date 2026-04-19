@@ -15,6 +15,29 @@ from .measurement_config import MeasurementConfig
 from . import visualize
 
 THRESHOLD = 100
+CENTERLINE_REGION_COLUMNS = [
+    "skel_cap_present",
+    "skel_cap_start_idx",
+    "skel_cap_end_idx",
+    "skel_cap_mean",
+    "skel_cap_integrated",
+    "skel_cap_count",
+    "skel_tip_start_idx",
+    "skel_tip_end_idx",
+    "skel_tip_mean",
+    "skel_tip_integrated",
+    "skel_tip_count",
+    "skel_middle_start_idx",
+    "skel_middle_end_idx",
+    "skel_middle_mean",
+    "skel_middle_integrated",
+    "skel_middle_count",
+    "skel_far_start_idx",
+    "skel_far_end_idx",
+    "skel_far_mean",
+    "skel_far_integrated",
+    "skel_far_count",
+]
 
 
 def date_to_float(s: str) -> Fraction:
@@ -473,9 +496,25 @@ def analyze_plate_folder(
         cached_config = df.attrs.get("measurement_config", None)
         if cached_config == measurement_config.to_dict():
             use_cached_dataframe = True
-            io.logger.info(
-                "Cached dataframe measurement configuration matches. Reusing dataframe."
-            )
+            if measurement_config.method == "centerline":
+                missing_columns = [
+                    column
+                    for column in CENTERLINE_REGION_COLUMNS
+                    if column not in df.columns
+                ]
+                if missing_columns:
+                    use_cached_dataframe = False
+                    io.logger.info(
+                        "Cached centerline dataframe is missing regional columns. Recomputing."
+                    )
+                else:
+                    io.logger.info(
+                        "Cached dataframe measurement configuration matches. Reusing dataframe."
+                    )
+            else:
+                io.logger.info(
+                    "Cached dataframe measurement configuration matches. Reusing dataframe."
+                )
         else:
             io.logger.info(
                 "Cached dataframe was created with a different measurement configuration. Recomputing."

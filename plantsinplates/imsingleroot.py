@@ -2,6 +2,7 @@ from typing import Any, Callable
 import pathlib
 
 import numpy as np
+from scipy.signal import find_peaks, peak_prominences, savgol_filter
 from skimage import morphology, measure, io as skio
 from skimage.measure import regionprops
 
@@ -258,8 +259,243 @@ def measure_roi_at_tip_simple(
     }
 
 
+def _empty_region_measurement() -> dict[str, int | float]:
+    return {
+        "start_idx": -1,
+        "end_idx": -1,
+        "mean": np.nan,
+        "integrated": np.nan,
+        "count": 0,
+    }
+
+
+def _measure_region(
+    intensities: np.ndarray, start_idx: int | None, end_idx: int | None
+) -> dict[str, int | float]:
+    if (
+        start_idx is None
+        or end_idx is None
+        or start_idx < 0
+        or end_idx < 0
+        or end_idx < start_idx
+        or start_idx >= len(intensities)
+    ):
+        return _empty_region_measurement()
+
+    clipped_start = int(max(0, start_idx))
+    clipped_end = int(min(len(intensities) - 1, end_idx))
+    if clipped_end < clipped_start:
+        return _empty_region_measurement()
+
+    region = intensities[clipped_start : clipped_end + 1]
+    if region.size == 0:
+        return _empty_region_measurement()
+
+    return {
+        "start_idx": clipped_start,
+        "end_idx": clipped_end,
+        "mean": float(np.mean(region)),
+        "integrated": float(np.sum(region)),
+        "count": int(region.size),
+    }
+
+
+def _find_valley_index(
+    intensities: np.ndarray, left_peak_idx: int, right_peak_idx: int
+) -> int:
+    if right_peak_idx <= left_peak_idx:
+        return int(right_peak_idx)
+
+    valley_segment = intensities[left_peak_idx : right_peak_idx + 1]
+    return int(left_peak_idx + int(np.argmin(valley_segment)))
+
+
+def _find_tip_right_boundary_without_cap(
+    intensities: np.ndarray, tip_peak_idx: int
+) -> int:
+    if tip_peak_idx >= len(intensities) - 1:
+        return int(len(intensities) - 1)
+
+    right = intensities[tip_peak_idx + 1 :]
+    local_minima, _ = find_peaks(-right)
+    if len(local_minima) > 0:
+        return int(tip_peak_idx + 1 + int(local_minima[0]))
+
+    right_min = float(np.min(right))
+    tip_height = float(intensities[tip_peak_idx])
+    target_intensity = tip_height - 0.5 * (tip_height - right_min)
+    candidates = np.where(right <= target_intensity)[0]
+    if len(candidates) > 0:
+        return int(tip_peak_idx + 1 + int(candidates[0]))
+
+    return int(len(intensities) - 1)
+
+
+def _find_tip_left_boundary_at_target(
+    intensities: np.ndarray, tip_peak_idx: int, target_intensity: float
+) -> int:
+    for idx in range(tip_peak_idx, 0, -1):
+        value_left = float(intensities[idx - 1])
+        value_right = float(intensities[idx])
+        if (
+            value_left <= target_intensity <= value_right
+            or value_left >= target_intensity >= value_right
+        ):
+            if abs(value_right - target_intensity) <= abs(
+                value_left - target_intensity
+            ):
+                return idx
+            return idx - 1
+
+    left = intensities[: tip_peak_idx + 1]
+    return int(np.argmin(np.abs(left - target_intensity)))
+
+
+def _segment_centerline_regions(intensities: np.ndarray) -> dict[str, Any]:
+    n = len(intensities)
+    if n == 0:
+        return {
+            "cap_present": False,
+            **{f"cap_{k}": v for k, v in _empty_region_measurement().items()},
+            **{f"tip_{k}": v for k, v in _empty_region_measurement().items()},
+            **{f"middle_{k}": v for k, v in _empty_region_measurement().items()},
+            **{f"far_{k}": v for k, v in _empty_region_measurement().items()},
+        }
+
+    peaks, _ = find_peaks(intensities)
+
+    cap_present = False
+    cap_valley_idx: int | None = None
+    tip_peak_idx: int | None = None
+
+    peak_prominences_values: np.ndarray | None = None
+
+    if len(peaks) >= 2:
+        profile_range = float(np.max(intensities) - np.min(intensities))
+        eps = max(profile_range * 1e-9, 1e-12)
+        cap_min_drop = max(profile_range * 0.08, eps)
+        cap_min_prominence = max(profile_range * 0.05, eps)
+
+        peak_prominences_values = peak_prominences(intensities, peaks)[0]
+        rightmost_peak_idx = int(peaks[-1])
+        previous_peak_idx = int(peaks[-2])
+        valley_idx = _find_valley_index(
+            intensities, previous_peak_idx, rightmost_peak_idx
+        )
+
+        cap_drop = float(intensities[rightmost_peak_idx] - intensities[valley_idx])
+        cap_prominence = float(peak_prominences_values[-1])
+        separated = rightmost_peak_idx - previous_peak_idx >= 2
+
+        if (
+            separated
+            and cap_drop >= cap_min_drop
+            and cap_prominence >= cap_min_prominence
+        ):
+            cap_present = True
+            cap_valley_idx = valley_idx
+            left_peaks = peaks[peaks <= cap_valley_idx]
+            if len(left_peaks) > 0:
+                tip_peak_idx = int(left_peaks[-1])
+            else:
+                tip_peak_idx = previous_peak_idx
+
+    if tip_peak_idx is None:
+        if len(peaks) > 0:
+            if len(peaks) == 1:
+                tip_peak_idx = int(peaks[0])
+            else:
+                if peak_prominences_values is None:
+                    peak_prominences_values = peak_prominences(intensities, peaks)[0]
+                tip_peak_idx = int(peaks[int(np.argmax(peak_prominences_values))])
+        else:
+            tip_peak_idx = int(np.argmax(intensities))
+
+    if cap_present and cap_valley_idx is not None:
+        tip_right_idx = int(cap_valley_idx)
+    else:
+        tip_right_idx = _find_tip_right_boundary_without_cap(intensities, tip_peak_idx)
+
+    tip_right_idx = int(np.clip(tip_right_idx, 0, n - 1))
+    target_intensity = float(intensities[tip_right_idx])
+    tip_left_idx = _find_tip_left_boundary_at_target(
+        intensities, tip_peak_idx, target_intensity
+    )
+
+    tip_start_idx = int(min(tip_left_idx, tip_right_idx))
+    tip_end_idx = int(max(tip_left_idx, tip_right_idx))
+    if tip_end_idx < tip_start_idx:
+        tip_start_idx = tip_peak_idx
+        tip_end_idx = tip_peak_idx
+
+    tip_width = max(1, tip_end_idx - tip_start_idx + 1)
+
+    middle_end_idx = tip_start_idx - 1
+    middle_start_idx = middle_end_idx - tip_width + 1
+    if middle_end_idx < 0:
+        middle_start_idx = -1
+        middle_end_idx = -1
+    else:
+        middle_start_idx = max(0, middle_start_idx)
+
+    far_end_idx = middle_start_idx - 1
+    far_start_idx = far_end_idx - tip_width + 1
+    if far_end_idx < 0:
+        far_start_idx = -1
+        far_end_idx = -1
+    else:
+        far_start_idx = max(0, far_start_idx)
+
+    if cap_present and cap_valley_idx is not None:
+        cap_start_idx = int(np.clip(cap_valley_idx, 0, n - 1))
+        cap_end_idx = int(n - 1)
+    else:
+        cap_start_idx = None
+        cap_end_idx = None
+
+    cap_measurement = _measure_region(intensities, cap_start_idx, cap_end_idx)
+    tip_measurement = _measure_region(intensities, tip_start_idx, tip_end_idx)
+    middle_measurement = _measure_region(intensities, middle_start_idx, middle_end_idx)
+    far_measurement = _measure_region(intensities, far_start_idx, far_end_idx)
+
+    return {
+        "cap_present": bool(cap_present),
+        **{f"cap_{k}": v for k, v in cap_measurement.items()},
+        **{f"tip_{k}": v for k, v in tip_measurement.items()},
+        **{f"middle_{k}": v for k, v in middle_measurement.items()},
+        **{f"far_{k}": v for k, v in far_measurement.items()},
+    }
+
+
+def _smooth_skeleton_intensities(
+    intensities: np.ndarray, intensity_savgol_window: int
+) -> np.ndarray:
+    if intensity_savgol_window <= 0:
+        return intensities
+
+    if len(intensities) <= 3:
+        return intensities
+
+    window = min(intensity_savgol_window, len(intensities))
+    if window % 2 == 0:
+        window -= 1
+
+    polyorder = 3
+    if window <= polyorder:
+        return intensities
+
+    return np.asarray(
+        savgol_filter(intensities, window_length=window, polyorder=polyorder),
+        dtype=np.float64,
+    )
+
+
 def measure_skeleton(
-    im: IntensityImage, skeleton: MaskImage, perpendicular_width: int, length: int
+    im: IntensityImage,
+    skeleton: MaskImage,
+    perpendicular_width: int,
+    length: int,
+    intensity_savgol_window: int = 0,
 ) -> SkeletonMeasurement:
     """Measure a region of interest around the tip of a root.
 
@@ -292,7 +528,10 @@ def measure_skeleton(
         f"Expected shape [_, 2], found {coordinates.shape}"
     )
 
-    intensities = np.asarray([np.sum(result["intensities"]) for result in results])
+    intensities = np.asarray(
+        [np.sum(result["intensities"]) for result in results], dtype=np.float64
+    )
+    intensities = _smooth_skeleton_intensities(intensities, intensity_savgol_window)
 
     last_argmax = len(intensities) - np.argmax(intensities[::-1]) - 1
 
@@ -300,11 +539,14 @@ def measure_skeleton(
 
     sel = np.abs(distance_to_max <= length)
 
+    region_measurements = _segment_centerline_regions(intensities)
+
     return {
         "intensities": intensities,
         "intensity": float(np.sum(intensities[sel])),
-        "pixel_count": np.sum(sel),
+        "pixel_count": int(np.sum(sel)),
         "_coordinates": coordinates,  # [sel, :],
+        **region_measurements,
     }
 
 
@@ -372,6 +614,7 @@ def _measure_image(
                 np.logical_and(skeleton, root_mask),
                 measurement_config.perpendicular_width,
                 measurement_config.length,
+                measurement_config.intensity_savgol_window,
             ),
         ),
     }

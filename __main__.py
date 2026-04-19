@@ -235,6 +235,9 @@ class AnalyzeApp(tk.Tk):
         self.savgol_window_var = tk.StringVar(
             value=str(self.default_measurement_config.savgol_window)
         )
+        self.intensity_savgol_window_var = tk.StringVar(
+            value=str(self.default_measurement_config.intensity_savgol_window)
+        )
 
         ttk.Label(config_frame, text="Method").grid(
             row=0, column=0, padx=5, pady=4, sticky=tk.W
@@ -286,13 +289,25 @@ class AnalyzeApp(tk.Tk):
         self.length_entry.grid(row=1, column=3, padx=5, pady=4, sticky=tk.W)
 
         self.savgol_window_label = ttk.Label(
-            config_frame, text="Savitzky-Golay window [um]"
+            config_frame, text="Shape smooth window [um]"
         )
         self.savgol_window_label.grid(row=1, column=4, padx=5, pady=4, sticky=tk.W)
         self.savgol_window_entry = ttk.Entry(
             config_frame, textvariable=self.savgol_window_var, width=8
         )
         self.savgol_window_entry.grid(row=1, column=5, padx=5, pady=4, sticky=tk.W)
+        self.intensity_savgol_window_label = ttk.Label(
+            config_frame, text="Profile smooth window [um]"
+        )
+        self.intensity_savgol_window_label.grid(
+            row=2, column=0, padx=5, pady=4, sticky=tk.W
+        )
+        self.intensity_savgol_window_entry = ttk.Entry(
+            config_frame, textvariable=self.intensity_savgol_window_var, width=8
+        )
+        self.intensity_savgol_window_entry.grid(
+            row=2, column=1, padx=5, pady=4, sticky=tk.W
+        )
         self.sync_config_ui()
 
         self.um_per_pixel_var = tk.StringVar(value="1")
@@ -370,6 +385,8 @@ class AnalyzeApp(tk.Tk):
             self.length_entry.grid_remove()
             self.savgol_window_label.grid_remove()
             self.savgol_window_entry.grid_remove()
+            self.intensity_savgol_window_label.grid_remove()
+            self.intensity_savgol_window_entry.grid_remove()
         else:
             self.box_size_label.grid_remove()
             self.box_size_entry.grid_remove()
@@ -385,6 +402,9 @@ class AnalyzeApp(tk.Tk):
             self.savgol_window_label.grid()
             self.savgol_window_entry.grid()
             self.savgol_window_entry.configure(state=input_state)
+            self.intensity_savgol_window_label.grid()
+            self.intensity_savgol_window_entry.grid()
+            self.intensity_savgol_window_entry.configure(state=input_state)
 
     def apply_calibration_entry_state(self):
         if not self.config_inputs_enabled:
@@ -549,6 +569,13 @@ class AnalyzeApp(tk.Tk):
         return parsed
 
     @staticmethod
+    def parse_nonnegative_float(name: str, value: str) -> float:
+        parsed = float(value)
+        if (not math.isfinite(parsed)) or parsed < 0:
+            raise ValueError(f"{name} must be a finite number >= 0")
+        return parsed
+
+    @staticmethod
     def um_to_px(value_um: float, um_per_pixel: float) -> int:
         pixels = int(math.floor((value_um / um_per_pixel) + 0.5))
         return max(1, pixels)
@@ -568,6 +595,9 @@ class AnalyzeApp(tk.Tk):
         savgol_window_um = self.parse_positive_float(
             "savgol_window [um]", self.savgol_window_var.get()
         )
+        intensity_savgol_window_um = self.parse_nonnegative_float(
+            "intensity_savgol_window [um]", self.intensity_savgol_window_var.get()
+        )
         box_offset = self.parse_finite_float(
             "box_offset [box]", self.box_offset_var.get()
         )
@@ -579,6 +609,11 @@ class AnalyzeApp(tk.Tk):
             perpendicular_width=self.um_to_px(perpendicular_width_um, um_per_pixel),
             length=self.um_to_px(length_um, um_per_pixel),
             savgol_window=self.um_to_px(savgol_window_um, um_per_pixel),
+            intensity_savgol_window=(
+                0
+                if intensity_savgol_window_um == 0
+                else self.um_to_px(intensity_savgol_window_um, um_per_pixel)
+            ),
         )
 
     def clear_logs(self):
@@ -647,6 +682,7 @@ def build_measurement_config(
     perpendicular_width: int,
     length: int,
     savgol_window: int,
+    intensity_savgol_window: int,
 ) -> MeasurementConfig:
     try:
         return MeasurementConfig(
@@ -656,6 +692,7 @@ def build_measurement_config(
             perpendicular_width=perpendicular_width,
             length=length,
             savgol_window=savgol_window,
+            intensity_savgol_window=intensity_savgol_window,
         )
     except ValueError as ex:
         raise typer.BadParameter(str(ex)) from ex
@@ -673,9 +710,16 @@ def gui(
             help="Signed shift in box-size units (0=centered, +1=towards, -1=away)",
         ),
     ] = 0.0,
-    perpendicular_width: Annotated[int, typer.Option("--perpendicular-width")] = 3,
-    length: Annotated[int, typer.Option("--length")] = 10,
-    savgol_window: Annotated[int, typer.Option("--savgol-window")] = 100,
+    perpendicular_width: Annotated[int, typer.Option("--perpendicular-width")] = 50,
+    length: Annotated[int, typer.Option("--length")] = 50,
+    savgol_window: Annotated[int, typer.Option("--savgol-window")] = 25,
+    intensity_savgol_window: Annotated[
+        int,
+        typer.Option(
+            "--intensity-savgol-window",
+            help="Savitzky-Golay window for smoothing skel_intensities (0 disables).",
+        ),
+    ] = 25,
     reuse_artifacts: Annotated[
         bool,
         typer.Option(
@@ -696,6 +740,7 @@ def gui(
         perpendicular_width=perpendicular_width,
         length=length,
         savgol_window=savgol_window,
+        intensity_savgol_window=intensity_savgol_window,
     )
     app = AnalyzeApp(
         data_dir,
@@ -744,9 +789,16 @@ def test(
             help="Signed shift in box-size units (0=centered, +1=towards, -1=away)",
         ),
     ] = 0.0,
-    perpendicular_width: Annotated[int, typer.Option("--perpendicular-width")] = 3,
-    length: Annotated[int, typer.Option("--length")] = 10,
-    savgol_window: Annotated[int, typer.Option("--savgol-window")] = 100,
+    perpendicular_width: Annotated[int, typer.Option("--perpendicular-width")] = 50,
+    length: Annotated[int, typer.Option("--length")] = 50,
+    savgol_window: Annotated[int, typer.Option("--savgol-window")] = 25,
+    intensity_savgol_window: Annotated[
+        int,
+        typer.Option(
+            "--intensity-savgol-window",
+            help="Savitzky-Golay window for smoothing skel_intensities (0 disables).",
+        ),
+    ] = 25,
     reuse_artifacts: Annotated[
         bool,
         typer.Option(
@@ -762,6 +814,7 @@ def test(
         perpendicular_width=perpendicular_width,
         length=length,
         savgol_window=savgol_window,
+        intensity_savgol_window=intensity_savgol_window,
     )
     path = pathlib.Path(data_dir)
     print(path)

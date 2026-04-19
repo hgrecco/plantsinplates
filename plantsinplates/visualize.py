@@ -11,7 +11,6 @@ from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import skimage.io as skio
-import skimage.morphology as skimorph
 from seaborn import objects as so
 from seaborn import axes_style
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -44,6 +43,13 @@ TAB10_COLORS = [
     "tab:gray",
     "tab:olive",
     "tab:cyan",
+]
+
+CENTERLINE_REGION_STYLES: list[tuple[str, str]] = [
+    ("far", "#4C78A8"),
+    ("middle", "#54A24B"),
+    ("tip", "#F58518"),
+    ("cap", "#E45756"),
 ]
 
 FOOTNOTE_DATE: str = ""
@@ -304,6 +310,81 @@ def centerline_mask_style(df: pd.DataFrame) -> tuple[int, float]:
     dilation_radius = max(0, perpendicular_width // 2)
     alpha = 0.6
     return dilation_radius, alpha
+
+
+def extract_centerline_region_bounds(
+    record: pd.Series, region: str, profile_len: int
+) -> tuple[int, int] | None:
+    if profile_len <= 0:
+        return None
+
+    start_key = f"skel_{region}_start_idx"
+    end_key = f"skel_{region}_end_idx"
+
+    if start_key not in record or end_key not in record:
+        return None
+
+    try:
+        start_idx = int(record[start_key])
+        end_idx = int(record[end_key])
+    except (TypeError, ValueError):
+        return None
+
+    if start_idx < 0 or end_idx < 0 or end_idx < start_idx:
+        return None
+
+    start_idx = min(start_idx, profile_len - 1)
+    end_idx = min(end_idx, profile_len - 1)
+
+    if end_idx < start_idx:
+        return None
+
+    return start_idx, end_idx
+
+
+def overlay_centerline_regions(
+    ax: Axes, record: pd.Series, profile: np.ndarray
+) -> None:
+    if profile.size == 0:
+        return
+
+    finite = profile[np.isfinite(profile)]
+    if finite.size == 0:
+        y_max = 1.0
+        y_min = 0.0
+    else:
+        y_max = float(np.max(finite))
+        y_min = float(np.min(finite))
+
+    y_span = max(y_max - y_min, 1e-9)
+    label_base_y = y_max - 0.04 * y_span
+    label_step = 0.10 * y_span
+
+    for region_rank, (region_name, color) in enumerate(CENTERLINE_REGION_STYLES):
+        if region_name == "cap":
+            cap_present = bool(record.get("skel_cap_present", False))
+            if not cap_present:
+                continue
+
+        bounds = extract_centerline_region_bounds(record, region_name, len(profile))
+        if bounds is None:
+            continue
+
+        start_idx, end_idx = bounds
+        ax.axvspan(start_idx - 0.5, end_idx + 0.5, color=color, alpha=0.22, lw=0)
+
+        label_x = 0.5 * (start_idx + end_idx)
+        label_y = label_base_y - region_rank * label_step
+        ax.text(
+            label_x,
+            label_y,
+            region_name.upper(),
+            color=color,
+            fontsize=4,
+            ha="center",
+            va="top",
+            weight="bold",
+        )
 
 
 def relabel(s: str) -> str:
@@ -798,16 +879,12 @@ def generate_dateview(
             ax_mask.set_xticks([])
             ax_mask.set_yticks([])
 
-            mask_layer = (mask > 0).astype(np.uint8)
-            skeleton_layer = (skeleton_mask > 0).astype(np.uint8)
-            combined_mask = mask_layer + skeleton_layer
-
-            ax_mask.imshow(
-                combined_mask,
-                cmap=CMAP3,
-                norm=NORM_CMAP3,
-                interpolation="none",
-            )
+            mask_layer = mask > 0
+            ax_mask.imshow(im, cmap="gray")
+            mask_overlay = np.zeros((*mask_layer.shape, 4), dtype=np.float32)
+            mask_overlay[..., 1] = 1.0  # green
+            mask_overlay[..., 3] = mask_layer.astype(np.float32) * 0.30
+            ax_mask.imshow(mask_overlay, interpolation="none")
             # ax.set_title(f"{np.count_nonzero(mask)}\n{np.count_nonzero(skeleton_mask)}", fontsize=4)
             if (
                 measurement_method == "box"
@@ -827,24 +904,60 @@ def generate_dateview(
             elif measurement_method == "centerline":
                 centerline_coords = extract_centerline_coords(record, skeleton_mask)
                 if len(centerline_coords) > 0:
-                    centerline_mask = np.zeros_like(skeleton_mask, dtype=np.bool_)
                     coords = centerline_coords.astype(np.int64)
-                    rows = np.clip(coords[:, 0], 0, centerline_mask.shape[0] - 1)
-                    cols = np.clip(coords[:, 1], 0, centerline_mask.shape[1] - 1)
-                    centerline_mask[rows, cols] = True
+                    rows = np.clip(coords[:, 0], 0, mask_layer.shape[0] - 1)
+                    cols = np.clip(coords[:, 1], 0, mask_layer.shape[1] - 1)
+                    line_coords = np.column_stack((rows, cols))
 
-                    if centerline_dilation_radius > 0:
-                        centerline_mask = skimorph.binary_dilation(
-                            centerline_mask,
-                            skimorph.disk(centerline_dilation_radius),
+                    drawn = False
+                    for region_name, color in CENTERLINE_REGION_STYLES:
+                        if region_name == "cap" and not bool(
+                            record.get("skel_cap_present", False)
+                        ):
+                            continue
+
+                        bounds = extract_centerline_region_bounds(
+                            record, region_name, len(line_coords)
                         )
+                        if bounds is None:
+                            continue
 
-                    overlay = np.zeros((*centerline_mask.shape, 4), dtype=np.float32)
-                    overlay[..., 0] = 1.0  # red
-                    overlay[..., 3] = (
-                        centerline_mask.astype(np.float32) * centerline_alpha
-                    )
-                    ax_image.imshow(overlay, interpolation="none")
+                        start_idx, end_idx = bounds
+                        segment = line_coords[start_idx : end_idx + 1]
+                        if len(segment) == 0:
+                            continue
+
+                        ax_mask.plot(
+                            segment[:, 1],
+                            segment[:, 0],
+                            color="white",
+                            linewidth=2.0,
+                            alpha=0.75,
+                        )
+                        ax_mask.plot(
+                            segment[:, 1],
+                            segment[:, 0],
+                            color=color,
+                            linewidth=1.2,
+                            alpha=1.0,
+                        )
+                        drawn = True
+
+                    if not drawn:
+                        ax_mask.plot(
+                            line_coords[:, 1],
+                            line_coords[:, 0],
+                            color="white",
+                            linewidth=2.0,
+                            alpha=0.75,
+                        )
+                        ax_mask.plot(
+                            line_coords[:, 1],
+                            line_coords[:, 0],
+                            color="#E45756",
+                            linewidth=1.2,
+                            alpha=1.0,
+                        )
 
     if measurement_method != "centerline" or "skel_intensities" not in date_df.columns:
         return
@@ -896,7 +1009,9 @@ def generate_dateview(
             if col == 1:
                 ax.set_ylabel(row, fontsize="xx-small")
 
-            ax.plot(record["skel_intensities"])
+            profile = np.asarray(record["skel_intensities"], dtype=np.float64)
+            ax.plot(profile, color="black", linewidth=0.8)
+            overlay_centerline_regions(ax, record, profile)
 
             # Keep bottom row empty for the method-specific page layout.
             ax = axs[2 * row - 1][col - 1]
