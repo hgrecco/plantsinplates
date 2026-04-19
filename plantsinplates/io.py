@@ -1,9 +1,11 @@
 import pathlib
 import shutil
+import json
 import bioio_czi
 from skimage import io as skio
 
 import logging
+from typing import Any
 
 from .types import IntensityImage, is_intensity_image
 
@@ -51,6 +53,21 @@ def build_skeleton_path(image_path: pathlib.Path) -> pathlib.Path:
     skeleton_folder = image_path.parent / f"{PREFIX}skeleton"
     skeleton_path = skeleton_folder / (image_path.stem + ".png")
     return skeleton_path
+
+
+def build_artifact_manifest_path(image_path: pathlib.Path) -> pathlib.Path:
+    """Build standardized artifact manifest path for an image.
+
+    If the image belongs to a plate folder, this returns a single plate-level
+    manifest path (`<plate>/_output_manifest.json`) shared by all image artifacts.
+    Otherwise, it falls back to a per-image manifest file.
+    """
+    plate_dir = find_parent_plate_dir(image_path)
+    if plate_dir is not None:
+        return plate_dir / f"{PREFIX}manifest.json"
+
+    manifest_folder = image_path.parent / f"{PREFIX}manifest"
+    return manifest_folder / (image_path.name + ".json")
 
 
 def build_preflight_path(folder: pathlib.Path) -> pathlib.Path:
@@ -143,6 +160,113 @@ def read(p: str | pathlib.Path) -> IntensityImage:
     return out
 
 
+def build_source_signature(path: pathlib.Path) -> dict[str, Any]:
+    """Build a stable signature for an input file."""
+    stat = path.stat()
+    return {
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def find_parent_plate_dir(path: pathlib.Path) -> pathlib.Path | None:
+    """Find the nearest parent directory that looks like a plate folder."""
+    current = path if path.is_dir() else path.parent
+    for parent in (current, *current.parents):
+        if parent.stem.startswith("plate"):
+            return parent
+    return None
+
+
+def build_image_manifest_key(image_path: pathlib.Path, plate_dir: pathlib.Path) -> str:
+    """Build stable image key for a shared plate manifest."""
+    return pathlib.PurePosixPath(
+        image_path.relative_to(plate_dir).as_posix()
+    ).as_posix()
+
+
+def source_signature_matches(
+    source_signature: dict[str, Any] | None,
+    expected_signature: dict[str, Any],
+) -> bool:
+    """Return whether two source signatures match."""
+    if source_signature is None:
+        return False
+    return source_signature.get("size") == expected_signature.get(
+        "size"
+    ) and source_signature.get("mtime_ns") == expected_signature.get("mtime_ns")
+
+
+def read_artifact_manifest(image_path: pathlib.Path) -> dict[str, Any]:
+    """Read artifact manifest for an image, returning empty data on failure.
+
+    For images inside plate folders, this reads the shared plate manifest and
+    returns only the entry corresponding to the provided image.
+    """
+    manifest_path = build_artifact_manifest_path(image_path)
+    if not manifest_path.exists():
+        return {}
+    try:
+        raw_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    if not isinstance(raw_data, dict):
+        return {}
+
+    plate_dir = find_parent_plate_dir(image_path)
+    if plate_dir is None:
+        return raw_data
+
+    images = raw_data.get("images")
+    if not isinstance(images, dict):
+        return {}
+
+    image_key = build_image_manifest_key(image_path, plate_dir)
+    image_data = images.get(image_key)
+    return image_data if isinstance(image_data, dict) else {}
+
+
+def write_artifact_manifest(image_path: pathlib.Path, manifest: dict[str, Any]) -> None:
+    """Write artifact manifest for an image.
+
+    For images inside plate folders, this updates the image entry in a shared
+    plate-level manifest.
+    """
+    manifest_path = build_artifact_manifest_path(image_path)
+    plate_dir = find_parent_plate_dir(image_path)
+
+    if plate_dir is None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8"
+        )
+        return
+
+    existing: dict[str, Any]
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            existing = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            existing = {}
+    else:
+        existing = {}
+
+    images = existing.get("images")
+    if not isinstance(images, dict):
+        images = {}
+        existing["images"] = images
+
+    image_key = build_image_manifest_key(image_path, plate_dir)
+    images[image_key] = manifest
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(existing, sort_keys=True, indent=2), encoding="utf-8"
+    )
+
+
 def find_file_with_extension(
     path: pathlib.Path, pattern: str, suffixes: list[str], case_sensitive: bool = False
 ) -> pathlib.Path | None:
@@ -189,3 +313,26 @@ def delete_cache(folder: pathlib.Path) -> None:
             p.unlink()
         else:
             shutil.rmtree(p, ignore_errors=True)
+
+
+def count_output_artifacts(folder: pathlib.Path) -> int:
+    """Count generated output artifacts under the given folder.
+
+    Parameters
+    ----------
+    folder : pathlib.Path
+        Folder to inspect.
+
+    Returns
+    -------
+    int
+        Number of filesystem entries matching the output prefix.
+    """
+    if not folder.exists():
+        return 0
+    return sum(1 for _ in folder.rglob(f"{PREFIX}*"))
+
+
+def has_output_artifacts(folder: pathlib.Path) -> bool:
+    """Return whether output artifacts exist under the given folder."""
+    return count_output_artifacts(folder) > 0

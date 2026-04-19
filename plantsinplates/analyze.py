@@ -324,6 +324,7 @@ def preflight_date(date_dir: pathlib.Path, long_df: pd.DataFrame) -> dict[str, A
 def measure_plate(
     preflight_dict: dict[str, Any],
     measurement_config: MeasurementConfig = MeasurementConfig(),
+    reuse_artifacts: bool = True,
 ) -> list[dict[Any, Any]]:
     """Measure all valid root images for a plate.
 
@@ -343,7 +344,9 @@ def measure_plate(
             try:
                 io.logger.info(f"Analyzing {fluo_record['path']}")
                 rec = imsingleroot.measure_image(
-                    fluo_record["path"], measurement_config=measurement_config
+                    fluo_record["path"],
+                    measurement_config=measurement_config,
+                    reuse_artifacts=reuse_artifacts,
                 )
             except Exception as ex:
                 io.logger.error(f"Could not measure {fluo_record['path']}: {ex}")
@@ -363,6 +366,7 @@ def measure_plate(
 def analyze_experiment_folder(
     experiment_path: pathlib.Path,
     measurement_config: MeasurementConfig = MeasurementConfig(),
+    reuse_artifacts: bool = True,
 ) -> None | pathlib.Path:
     """Analyze all plates in an experiment folder.
 
@@ -372,12 +376,17 @@ def analyze_experiment_folder(
         Path to the experiment folder.
     """
     io.logger.info(f"Analyzing experiment folder: {experiment_path.name}")
+    io.logger.info(f"Artifact reuse is {'enabled' if reuse_artifacts else 'disabled'}")
     df_paths: list[pathlib.Path | None] = []
     for plate_dir in sorted(experiment_path.glob("plate_*")):
         if not plate_dir.is_dir():
             continue
         df_paths.append(
-            analyze_plate_folder(plate_dir, measurement_config=measurement_config)
+            analyze_plate_folder(
+                plate_dir,
+                measurement_config=measurement_config,
+                reuse_artifacts=reuse_artifacts,
+            )
         )
 
     df_paths = [df_path for df_path in df_paths if df_path is not None]
@@ -421,6 +430,7 @@ def analyze_experiment_folder(
 def analyze_plate_folder(
     plate_dir: pathlib.Path,
     measurement_config: MeasurementConfig = MeasurementConfig(),
+    reuse_artifacts: bool = True,
 ) -> None | pathlib.Path:
     """Analyze a plate folder: preflight, measure, save results and summary.
 
@@ -430,11 +440,13 @@ def analyze_plate_folder(
         Path to the plate folder.
     """
     io.logger.info(f"Analyzing plate folder: {plate_dir.name}")
+    io.logger.info(f"Artifact reuse is {'enabled' if reuse_artifacts else 'disabled'}")
 
     preflight_path = io.build_preflight_path(plate_dir)
-    if preflight_path.exists():
+    if reuse_artifacts and preflight_path.exists():
         io.logger.info("Loading preflight from cache")
-        preflight_dict = pickle.load(open(preflight_path, "rb"))
+        with open(preflight_path, "rb") as fi:
+            preflight_dict = pickle.load(fi)
     else:
         try:
             preflight_dict = preflight_plate(
@@ -450,23 +462,31 @@ def analyze_plate_folder(
         except Exception as ex:
             io.logger.error(f"Error while preflighting plate {plate_dir.name}: {ex}")
             return
-        pickle.dump(preflight_dict, open(preflight_path, "wb"))
+        with open(preflight_path, "wb") as fo:
+            pickle.dump(preflight_dict, fo)
 
     df_path = io.build_dataframe_path(plate_dir)
     use_cached_dataframe = False
-    if df_path.exists():
+    if reuse_artifacts and df_path.exists():
         io.logger.info("Loading existing dataframe from cache")
         df = pd.read_pickle(df_path)
         cached_config = df.attrs.get("measurement_config", None)
         if cached_config == measurement_config.to_dict():
             use_cached_dataframe = True
+            io.logger.info(
+                "Cached dataframe measurement configuration matches. Reusing dataframe."
+            )
         else:
             io.logger.info(
                 "Cached dataframe was created with a different measurement configuration. Recomputing."
             )
 
     if not use_cached_dataframe:
-        records = measure_plate(preflight_dict, measurement_config=measurement_config)
+        records = measure_plate(
+            preflight_dict,
+            measurement_config=measurement_config,
+            reuse_artifacts=reuse_artifacts,
+        )
         df = pd.DataFrame.from_records(records)
 
         if len(df) == 0:

@@ -20,6 +20,9 @@ from .types import (
     SkeletonMeasurement,
 )
 
+MASK_ARTIFACT_VERSION = 1
+SKELETON_ARTIFACT_VERSION = 1
+
 
 def prefix_keys(
     prefix: str, adict: dict[str, Any], skip_: bool = False
@@ -72,6 +75,40 @@ def sort_labels(
         out[labeled_image == label] = new_label
 
     return out
+
+
+def _compute_mask(im: IntensityImage) -> MaskImage:
+    mask = im > 130
+    mask = morphology.remove_small_objects(mask)
+    mask = morphology.remove_small_holes(mask)
+    assert _types.is_mask_image(mask), "Not a mask image"
+    return mask
+
+
+def _mask_manifest_matches(
+    mask_entry: dict[str, Any] | None, source_signature: dict[str, Any]
+) -> bool:
+    if mask_entry is None:
+        return False
+    return mask_entry.get(
+        "version"
+    ) == MASK_ARTIFACT_VERSION and io.source_signature_matches(
+        mask_entry.get("source"), source_signature
+    )
+
+
+def _skeleton_manifest_matches(
+    skeleton_entry: dict[str, Any] | None,
+    source_signature: dict[str, Any],
+    savgol_window: int,
+) -> bool:
+    if skeleton_entry is None:
+        return False
+    return (
+        skeleton_entry.get("version") == SKELETON_ARTIFACT_VERSION
+        and skeleton_entry.get("savgol_window") == savgol_window
+        and io.source_signature_matches(skeleton_entry.get("source"), source_signature)
+    )
 
 
 def interpolate_line(mask: MaskImage, axis: int) -> tuple[FloatVector, FloatVector]:
@@ -341,20 +378,45 @@ def _measure_image(
 
 
 def measure_image(
-    path: pathlib.Path, measurement_config: MeasurementConfig = MeasurementConfig()
+    path: pathlib.Path,
+    measurement_config: MeasurementConfig = MeasurementConfig(),
+    reuse_artifacts: bool = True,
 ) -> dict[str, Any] | None:
+    source_signature = io.build_source_signature(path)
+    manifest = io.read_artifact_manifest(path) if reuse_artifacts else {}
     im = io.read(path)
+
     mask_path = io.build_mask_path(path)
-    if mask_path.exists():
-        mask = skio.imread(mask_path) > 0  # type: ignore
-        assert _types.is_mask_image(mask), "Not a mask image"
-    else:
+    raw_mask_entry = manifest.get("mask")
+    mask_entry = raw_mask_entry if isinstance(raw_mask_entry, dict) else None
+
+    reuse_mask = (
+        reuse_artifacts
+        and mask_path.exists()
+        and _mask_manifest_matches(mask_entry, source_signature)
+    )
+
+    if reuse_mask:
+        try:
+            mask = skio.imread(mask_path) > 0  # type: ignore
+            assert _types.is_mask_image(mask), "Not a mask image"
+            io.logger.info(f"Reusing mask artifact: {mask_path}")
+        except Exception:
+            io.logger.warning(
+                f"Could not reuse mask artifact {mask_path}, recomputing."
+            )
+            reuse_mask = False
+
+    if not reuse_mask:
         mask_path.parent.mkdir(parents=True, exist_ok=True)
-        mask = im > 130
-        mask = morphology.remove_small_objects(mask)
-        mask = morphology.remove_small_holes(mask)
-        assert _types.is_mask_image(mask), "Not a mask image"
+        mask = _compute_mask(im)
         skio.imsave(mask_path, mask.astype(np.uint8) * 255, check_contrast=False)
+        io.logger.info(f"Recomputed mask artifact: {mask_path}")
+        manifest["mask"] = {
+            "version": MASK_ARTIFACT_VERSION,
+            "source": source_signature,
+        }
+        io.write_artifact_manifest(path, manifest)
 
     if measurement_config.method == "box":
         return _measure_image(im, mask, measurement_config, None)
@@ -362,14 +424,49 @@ def measure_image(
     from .immultiroot import find_center_line
 
     skeleton_path = io.build_skeleton_path(path)
-    skeleton_path.parent.mkdir(parents=True, exist_ok=True)
-    skeleton_coords = find_center_line(
-        mask,
-        savgol_window=measurement_config.savgol_window,
+    raw_skeleton_entry = manifest.get("skeleton")
+    skeleton_entry = (
+        raw_skeleton_entry if isinstance(raw_skeleton_entry, dict) else None
     )
-    skeleton = np.zeros_like(mask)
-    skeleton[skeleton_coords[:, 0].astype(int), skeleton_coords[:, 1].astype(int)] = (
-        True
+
+    reuse_skeleton = (
+        reuse_artifacts
+        and skeleton_path.exists()
+        and _skeleton_manifest_matches(
+            skeleton_entry, source_signature, measurement_config.savgol_window
+        )
     )
-    skio.imsave(skeleton_path, skeleton.astype(np.uint8) * 255, check_contrast=False)
+
+    if reuse_skeleton:
+        try:
+            skeleton = skio.imread(skeleton_path) > 0  # type: ignore
+            assert _types.is_mask_image(skeleton), "Not a mask image"
+            io.logger.info(f"Reusing skeleton artifact: {skeleton_path}")
+        except Exception:
+            io.logger.warning(
+                f"Could not reuse skeleton artifact {skeleton_path}, recomputing."
+            )
+            reuse_skeleton = False
+
+    if not reuse_skeleton:
+        skeleton_path.parent.mkdir(parents=True, exist_ok=True)
+        skeleton_coords = find_center_line(
+            mask,
+            savgol_window=measurement_config.savgol_window,
+        )
+        skeleton = np.zeros_like(mask)
+        skeleton[
+            skeleton_coords[:, 0].astype(int), skeleton_coords[:, 1].astype(int)
+        ] = True
+        skio.imsave(
+            skeleton_path, skeleton.astype(np.uint8) * 255, check_contrast=False
+        )
+        io.logger.info(f"Recomputed skeleton artifact: {skeleton_path}")
+        manifest["skeleton"] = {
+            "version": SKELETON_ARTIFACT_VERSION,
+            "savgol_window": measurement_config.savgol_window,
+            "source": source_signature,
+        }
+        io.write_artifact_manifest(path, manifest)
+
     return _measure_image(im, mask, measurement_config, skeleton)

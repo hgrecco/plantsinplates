@@ -783,12 +783,15 @@ def generate_dateview(
                 )
                 mask = np.zeros(im.shape, dtype=np.bool_)
 
-            try:
-                skeleton_mask = io.read(io.build_skeleton_path(record["path"]))
-            except FileNotFoundError as ex:
-                io.logger.error(
-                    f"No skeleton mask found for {record['path']} at {io.build_skeleton_path(record['path'])}: {ex}"
-                )
+            if measurement_method == "centerline":
+                try:
+                    skeleton_mask = io.read(io.build_skeleton_path(record["path"]))
+                except FileNotFoundError as ex:
+                    io.logger.error(
+                        f"No skeleton mask found for {record['path']} at {io.build_skeleton_path(record['path'])}: {ex}"
+                    )
+                    skeleton_mask = np.zeros(im.shape, dtype=np.bool_)
+            else:
                 skeleton_mask = np.zeros(im.shape, dtype=np.bool_)
 
             ax_mask.axis(True)
