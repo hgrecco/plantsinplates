@@ -121,11 +121,18 @@ the experiment directory. To run one plate only, pass its `plate_*` path.
 pixi run gui-dev /absolute/path/to/experiment_014
 ```
 
-In the GUI, choose an `experiment_*` or `plate_*` folder, select a measurement
-method, adjust the visible measurement settings, and select **Analyze folder**.
-The GUI labels size settings in micrometers and converts them to pixels using
-the displayed calibration. It also offers **Reuse output artifacts** and
-**Delete previous output** controls.
+The GUI guides you through choosing a valid `experiment_*` or `plate_*` folder,
+confirming image calibration, choosing a measurement method, and adjusting only
+the settings relevant to that method. Select **Analyze experiment** or
+**Analyze plate** when the required inputs are valid. Size settings are shown in
+micrometers and converted to pixels using the displayed calibration. A valid
+`cal.txt` is read-only; otherwise the calibration can be entered manually.
+
+The **Reuse valid previous results** option keeps compatible output artifacts;
+turn it off to force recalculation. **Delete previous output…** shows every
+generated artifact for confirmation before removing it. After a run, the
+Results panel provides the output path, available Excel/PDF actions, and a
+collapsible Technical log for detailed diagnostics.
 
 ### Batch analysis
 
