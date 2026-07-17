@@ -1,7 +1,7 @@
-[project]
+[workspace]
 authors = ["Hernan Grecco <hgrecco@gmail.com>"]
 channels = ["https://prefix.dev/conda-forge", "conda-forge"]
-name = "Datos VAMP721"
+name = "Plants in Plates"
 platforms = ["osx-arm64", "linux-64", "win-64"]
 version = "0.1.0"
 
@@ -40,6 +40,7 @@ typer = ">=0.16.0,<0.17"
 bioio = ">=0.0.1, <0.0.2"
 bioio-czi = ">=1.0.2, <2"
 bioio-ome-tiff = ">=1.0.1, <2"
+ttkbootstrap = ">=1.20.4, <2"
 pandas-stubs = "*"
 matplotlib-stubs = "*"
 scipy-stubs = "*"

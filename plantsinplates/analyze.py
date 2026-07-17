@@ -1,9 +1,15 @@
-import pickle
-from typing import Any, Literal
-import pathlib
+import hashlib
 import json
+import logging
+import math
+import pathlib
+import pickle
+import threading
+import uuid
+from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
+from typing import Any, Literal
 
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
@@ -11,6 +17,7 @@ import pandas as pd
 
 from . import io
 from . import imsingleroot
+from . import workflow
 from .measurement_config import MeasurementConfig
 from . import visualize
 
@@ -284,6 +291,11 @@ def preflight_plate(plate_dir: pathlib.Path, long_df: pd.DataFrame) -> dict[str,
         date_dir.name.split("_")[1]: date_dir
         for date_dir in plate_dir.rglob("date_*")
         if date_dir.is_dir()
+        and workflow.CACHE_DIRECTORY not in date_dir.relative_to(plate_dir).parts
+        and not any(
+            part.startswith(workflow.RUN_PREFIX)
+            for part in date_dir.relative_to(plate_dir).parts
+        )
     }
     in_df: set[str] = set(long_df["date"].unique())
 
@@ -325,8 +337,15 @@ def preflight_date(date_dir: pathlib.Path, long_df: pd.DataFrame) -> dict[str, A
     """
     in_fs = {
         str(fluo_file.relative_to(date_dir)): fluo_file
-        for fluo_file in date_dir.rglob("*.czi")
-        if fluo_file.suffix in io.FLUO_SUFFIXES and not fluo_file.stem.startswith(".")
+        for fluo_file in date_dir.rglob("*")
+        if fluo_file.is_file()
+        and fluo_file.suffix.lower() in io.FLUO_SUFFIXES
+        and not fluo_file.stem.startswith(".")
+        and not fluo_file.stem.lower().startswith("overview")
+        and not any(
+            part.startswith(workflow.RUN_PREFIX)
+            for part in fluo_file.relative_to(date_dir).parts
+        )
     }
 
     in_df: set[str] = set(long_df["fluo"][~long_df["fluo"].isna()].unique())
@@ -407,6 +426,19 @@ def analyze_experiment_folder(
     experiment_path : pathlib.Path
         Path to the experiment folder.
     """
+    request = workflow.AnalysisRequest(
+        input_path=experiment_path,
+        input_kind="experiment",
+        settings=measurement_config,
+        settings_unit="px",
+        calibration=workflow.CalibrationSpec("pixels"),
+        reuse_policy="compatible" if reuse_artifacts else "none",
+    )
+    result = run_analysis(request)
+    return result.outputs.get("Data table")
+
+    # Historical in-place implementation retained below for the moment as a
+    # readable migration reference.  New callers always return above.
     io.logger.info(f"Analyzing experiment folder: {experiment_path.name}")
     io.logger.info(f"Artifact reuse is {'enabled' if reuse_artifacts else 'disabled'}")
     df_paths: list[pathlib.Path | None] = []
@@ -471,6 +503,19 @@ def analyze_plate_folder(
     plate_dir : pathlib.Path
         Path to the plate folder.
     """
+    request = workflow.AnalysisRequest(
+        input_path=plate_dir,
+        input_kind="plate",
+        settings=measurement_config,
+        settings_unit="px",
+        calibration=workflow.CalibrationSpec("pixels"),
+        reuse_policy="compatible" if reuse_artifacts else "none",
+    )
+    result = run_analysis(request)
+    return result.outputs.get("Data table")
+
+    # Historical in-place implementation retained below for the moment as a
+    # readable migration reference.  New callers always return above.
     io.logger.info(f"Analyzing plate folder: {plate_dir.name}")
     io.logger.info(f"Artifact reuse is {'enabled' if reuse_artifacts else 'disabled'}")
 
@@ -662,3 +707,798 @@ def analyze_plate_folder(
     io.logger.info(f"Finished analyzing plate folder: {plate_dir.name}")
 
     return df_path
+
+
+# ---------------------------------------------------------------------------
+# Run-scoped workflow used by the redesigned GUI and batch command.
+
+
+MEASUREMENT_CACHE_VERSION = 1
+
+
+@dataclass
+class _RunStats:
+    total: int = 0
+    completed: int = 0
+    reused: int = 0
+    recomputed: int = 0
+    skipped: int = 0
+    errors: int = 0
+    artifact_counts: dict[str, int] = field(default_factory=dict)
+
+
+def _emit_progress(
+    callback: workflow.ProgressCallback | None,
+    event: workflow.ProgressEvent,
+) -> None:
+    if callback is not None:
+        callback(event)
+
+
+def _plate_input_signature(plate_dir: pathlib.Path) -> str:
+    """Hash the workbook and relevant filesystem entries for preflight reuse."""
+    entries: list[tuple[str, int, int]] = []
+    info_path = plate_dir / "info.xlsx"
+    if info_path.exists():
+        stat = info_path.stat()
+        entries.append(("info.xlsx", stat.st_size, stat.st_mtime_ns))
+    for path in sorted(plate_dir.rglob("*"), key=str):
+        relative_parts = path.relative_to(plate_dir).parts
+        if workflow.CACHE_DIRECTORY in relative_parts or any(
+            part.startswith(workflow.RUN_PREFIX) for part in relative_parts
+        ):
+            continue
+        if path.is_dir() and path.name.startswith("date_"):
+            stat = path.stat()
+            entries.append((str(path.relative_to(plate_dir)), 0, stat.st_mtime_ns))
+        elif path.is_file() and path.suffix.lower() in workflow.IMAGE_SUFFIXES:
+            stat = path.stat()
+            entries.append(
+                (str(path.relative_to(plate_dir)), stat.st_size, stat.st_mtime_ns)
+            )
+    encoded = json.dumps(entries, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _load_run_preflight(
+    plate_dir: pathlib.Path, reuse_policy: workflow.ReusePolicy
+) -> tuple[dict[str, Any], bool]:
+    signature = _plate_input_signature(plate_dir)
+    cache_path = io.build_preflight_cache_path(plate_dir)
+    if reuse_policy != "none" and cache_path.exists():
+        try:
+            with cache_path.open("rb") as stream:
+                cached = pickle.load(stream)
+            if (
+                isinstance(cached, dict)
+                and cached.get("signature") == signature
+                and isinstance(cached.get("preflight"), dict)
+            ):
+                io.logger.info(f"Reusing validated preflight for {plate_dir.name}")
+                return cached["preflight"], True
+        except Exception:
+            io.logger.warning(
+                f"Could not reuse preflight cache for {plate_dir.name}; rebuilding."
+            )
+
+    preflight = preflight_plate(
+        plate_dir, prepare_info(pd.read_excel(plate_dir / "info.xlsx"))
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("wb") as stream:
+        pickle.dump({"signature": signature, "preflight": preflight}, stream)
+    return preflight, False
+
+
+def _round_um_to_px(value_um: float, um_per_pixel: float) -> int:
+    return max(1, int(np.floor((value_um / um_per_pixel) + 0.5)))
+
+
+def resolve_pixel_config(
+    request: workflow.AnalysisRequest, um_per_pixel: float | None
+) -> MeasurementConfig:
+    """Resolve user-facing settings to the pixel configuration used by algorithms."""
+    if request.settings_unit == "px":
+        return request.settings
+    if um_per_pixel is None or not math.isfinite(um_per_pixel) or um_per_pixel <= 0:
+        raise ValueError("A valid micrometers-per-pixel value is required")
+    settings = request.settings
+    return MeasurementConfig(
+        method=settings.method,
+        box_size=_round_um_to_px(settings.box_size, um_per_pixel),
+        box_offset=settings.box_offset,
+        perpendicular_width=_round_um_to_px(settings.perpendicular_width, um_per_pixel),
+        length=_round_um_to_px(settings.length, um_per_pixel),
+        savgol_window=_round_um_to_px(settings.savgol_window, um_per_pixel),
+        intensity_savgol_window=(
+            0
+            if settings.intensity_savgol_window == 0
+            else _round_um_to_px(settings.intensity_savgol_window, um_per_pixel)
+        ),
+    )
+
+
+def _resolve_image_calibration(
+    request: workflow.AnalysisRequest, image_path: pathlib.Path
+) -> workflow.CalibrationReading:
+    spec = request.calibration
+    if request.settings_unit == "px" or spec.mode == "pixels":
+        return workflow.CalibrationReading(
+            image_path,
+            "ok",
+            um_per_pixel=1.0,
+            message="Pixel-based settings; physical calibration is not required",
+        )
+    if spec.mode == "metadata":
+        # Always read again during analysis; an optional audit is informative and
+        # may be stale if the source file changed after the audit.
+        return workflow.read_image_calibration(image_path)
+    value = spec.shared_um_per_pixel
+    assert value is not None
+    audited = request.audit_results.get(str(image_path.resolve()))
+    return workflow.CalibrationReading(
+        image_path,
+        "ok",
+        x_um_per_pixel=(audited.x_um_per_pixel if audited else None),
+        y_um_per_pixel=(audited.y_um_per_pixel if audited else None),
+        um_per_pixel=value,
+        message=(
+            "Shared calibration from cal.txt"
+            if spec.mode == "cal_file"
+            else "Shared manual calibration"
+        ),
+    )
+
+
+def _calibration_report_row(
+    reading: workflow.CalibrationReading,
+    request: workflow.AnalysisRequest,
+    *,
+    measurement_status: str,
+    detail: str = "",
+) -> dict[str, Any]:
+    audited = request.audit_results.get(str(reading.path.resolve()))
+    embedded = audited or (reading if request.calibration.mode == "metadata" else None)
+    return {
+        "image": str(reading.path),
+        "calibration_mode": request.calibration.mode,
+        "calibration_status": reading.status,
+        "x_um_per_pixel": reading.x_um_per_pixel,
+        "y_um_per_pixel": reading.y_um_per_pixel,
+        "calibration_um_per_pixel": (
+            None if request.settings_unit == "px" else reading.um_per_pixel
+        ),
+        "calibration_message": reading.message,
+        "embedded_metadata_status": embedded.status if embedded else "not_checked",
+        "embedded_metadata_message": embedded.message if embedded else "",
+        "measurement_status": measurement_status,
+        "detail": detail,
+    }
+
+
+def _measurement_cache_key(
+    request: workflow.AnalysisRequest,
+    pixel_config: MeasurementConfig,
+    calibration: workflow.CalibrationReading,
+) -> dict[str, Any]:
+    return {
+        "version": MEASUREMENT_CACHE_VERSION,
+        "user_settings": request.settings.to_dict(),
+        "settings_unit": request.settings_unit,
+        "pixel_config": pixel_config.to_dict(),
+        "calibration_mode": request.calibration.mode,
+        "calibration_um_per_pixel": calibration.um_per_pixel,
+    }
+
+
+def _read_measurement_cache(
+    path: pathlib.Path, source_signature: dict[str, Any]
+) -> dict[str, Any] | None:
+    try:
+        with path.open("rb") as stream:
+            cached = pickle.load(stream)
+        if (
+            isinstance(cached, dict)
+            and io.source_signature_matches(cached.get("source"), source_signature)
+            and isinstance(cached.get("record"), dict)
+        ):
+            return cached["record"]
+    except Exception:
+        return None
+    return None
+
+
+def _write_measurement_cache(
+    path: pathlib.Path,
+    source_signature: dict[str, Any],
+    record: dict[str, Any],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
+    with temporary.open("wb") as stream:
+        pickle.dump({"source": source_signature, "record": record}, stream)
+    temporary.replace(path)
+
+
+def _measure_plate_for_run(
+    preflight_dict: dict[str, Any],
+    request: workflow.AnalysisRequest,
+    stats: _RunStats,
+    calibration_rows: list[dict[str, Any]],
+    progress: workflow.ProgressCallback | None,
+    cancel_event: threading.Event,
+) -> list[dict[Any, Any]]:
+    records: list[dict[Any, Any]] = []
+    for date, date_record in preflight_dict["dates"].items():
+        for _name, fluo_record in date_record["fluos"].items():
+            if cancel_event.is_set():
+                raise workflow.AnalysisCancelled()
+            path = pathlib.Path(fluo_record["path"])
+            plate = str(preflight_dict["plate"])
+            reading = _resolve_image_calibration(request, path)
+            if not reading.valid:
+                stats.skipped += 1
+                stats.completed += 1
+                detail = reading.message or "Calibration is unusable"
+                io.logger.warning(f"Skipping {path}: {detail}")
+                calibration_rows.append(
+                    _calibration_report_row(
+                        reading, request, measurement_status="skipped", detail=detail
+                    )
+                )
+                _emit_progress(
+                    progress,
+                    workflow.ProgressEvent(
+                        "measurement",
+                        stats.completed,
+                        stats.total,
+                        f"Skipped {path.name}: unusable calibration",
+                        current_path=path,
+                        plate=plate,
+                        reused=stats.reused,
+                        skipped=stats.skipped,
+                        errors=stats.errors,
+                    ),
+                )
+                continue
+
+            pixel_config = resolve_pixel_config(request, reading.um_per_pixel)
+            cache_key = _measurement_cache_key(request, pixel_config, reading)
+            cache_path = io.build_measurement_cache_path(path, cache_key)
+            try:
+                source_signature = io.build_source_signature(path)
+            except Exception as ex:
+                stats.errors += 1
+                stats.completed += 1
+                io.logger.error(f"Could not inspect {path}: {ex}")
+                calibration_rows.append(
+                    _calibration_report_row(
+                        reading,
+                        request,
+                        measurement_status="error",
+                        detail=str(ex),
+                    )
+                )
+                _emit_progress(
+                    progress,
+                    workflow.ProgressEvent(
+                        "measurement",
+                        stats.completed,
+                        stats.total,
+                        f"Error inspecting {path.name}",
+                        current_path=path,
+                        plate=plate,
+                        reused=stats.reused,
+                        skipped=stats.skipped,
+                        errors=stats.errors,
+                    ),
+                )
+                continue
+            record: dict[str, Any] | None = None
+            reused_measurement = False
+            if request.reuse_policy == "compatible" and cache_path.exists():
+                record = _read_measurement_cache(cache_path, source_signature)
+                reused_measurement = record is not None
+                if reused_measurement:
+                    io.logger.info(f"Reusing compatible measurement: {path}")
+
+            if record is None:
+                try:
+                    measured = imsingleroot.measure_image(
+                        path,
+                        measurement_config=pixel_config,
+                        reuse_artifacts=request.reuse_policy != "none",
+                        artifact_stats=stats.artifact_counts,
+                    )
+                    if measured is None:
+                        raise ValueError("No valid root was measured")
+                    record = {
+                        **fluo_record,
+                        **measured,
+                        "date": date,
+                        "calibration_um_per_pixel": (
+                            None
+                            if request.settings_unit == "px"
+                            else reading.um_per_pixel
+                        ),
+                        "calibration_source": request.calibration.mode,
+                        "calibration_x_um_per_pixel": reading.x_um_per_pixel,
+                        "calibration_y_um_per_pixel": reading.y_um_per_pixel,
+                        "measurement_config_px": json.dumps(
+                            pixel_config.to_dict(), sort_keys=True
+                        ),
+                    }
+                    try:
+                        _write_measurement_cache(cache_path, source_signature, record)
+                    except Exception as cache_error:
+                        io.logger.warning(
+                            f"Measured {path}, but could not update its reusable cache: {cache_error}"
+                        )
+                except Exception as ex:
+                    stats.errors += 1
+                    stats.completed += 1
+                    io.logger.error(f"Could not measure {path}: {ex}")
+                    calibration_rows.append(
+                        _calibration_report_row(
+                            reading,
+                            request,
+                            measurement_status="error",
+                            detail=str(ex),
+                        )
+                    )
+                    _emit_progress(
+                        progress,
+                        workflow.ProgressEvent(
+                            "measurement",
+                            stats.completed,
+                            stats.total,
+                            f"Error measuring {path.name}",
+                            current_path=path,
+                            plate=plate,
+                            reused=stats.reused,
+                            skipped=stats.skipped,
+                            errors=stats.errors,
+                        ),
+                    )
+                    continue
+
+            if reused_measurement:
+                stats.reused += 1
+            else:
+                stats.recomputed += 1
+            records.append(record)
+            stats.completed += 1
+            calibration_rows.append(
+                _calibration_report_row(
+                    reading,
+                    request,
+                    measurement_status="reused" if reused_measurement else "measured",
+                )
+            )
+            _emit_progress(
+                progress,
+                workflow.ProgressEvent(
+                    "measurement",
+                    stats.completed,
+                    stats.total,
+                    (
+                        f"Reused {path.name}"
+                        if reused_measurement
+                        else f"Measured {path.name}"
+                    ),
+                    current_path=path,
+                    plate=plate,
+                    reused=stats.reused,
+                    skipped=stats.skipped,
+                    errors=stats.errors,
+                ),
+            )
+    return records
+
+
+def _prepare_result_dataframe(
+    records: list[dict[Any, Any]],
+    preflight_dict: dict[str, Any],
+    request: workflow.AnalysisRequest,
+) -> pd.DataFrame:
+    df = pd.DataFrame.from_records(records)
+    if len(df) == 0:
+        return df
+    df["plate"] = preflight_dict["plate"]
+    if request.settings.method == "box":
+        df["signal_intensity"] = df["tip_fg_mean"] - df["tip_bg_mean"]
+    else:
+        df["signal_intensity"] = df["skel_intensity"]
+
+    df["date_float"] = df["date"].map(date_to_float)
+    df["delta_date_from_min"] = df["date_float"] - df["date_float"].min()
+    df["day_number"] = df["delta_date_from_min"].map(
+        lambda value: "0" if pd.isna(value) else "+" + day_number(value)
+    )
+    maximum_suffix = (
+        df["day_number"]
+        .map(lambda value: len(value.split("d")[-1]) if "d" in value else 0)
+        .max()
+    )
+    if maximum_suffix == 3:
+        df["day_number"] = df["delta_date_from_min"].map(
+            lambda value: "0" if pd.isna(value) else "+" + day_number(value, "h")
+        )
+    elif maximum_suffix == 6:
+        df["day_number"] = df["delta_date_from_min"].map(
+            lambda value: "0" if pd.isna(value) else "+" + day_number(value, "m")
+        )
+
+    df["date_float"] = df["date_float"].astype(float)
+    df["delta_date_from_min"] = df["delta_date_from_min"].astype(float)
+    df.sort_values(["date_float", "genotype", "row", "col"], inplace=True)
+    groups = df.groupby(["plate", "row", "col"])
+    df["delta_signal_intensity"] = groups["signal_intensity"].transform(
+        lambda values: values.diff()
+    )
+    df["delta_length"] = groups["length"].transform(lambda values: values.diff())
+    df["delta_date"] = groups["delta_date_from_min"].transform(
+        lambda values: values.diff()
+    )
+    df["avg_signal_intensity"] = groups["signal_intensity"].transform(
+        lambda values: values.rolling(2).mean()
+    )
+    df["delta_length_per_day"] = df["delta_length"] / df["delta_date"]
+    df["delta_signal_intensity_per_day"] = (
+        df["delta_signal_intensity"] / df["delta_date"]
+    )
+    df["plant_id_in_gt"] = (
+        df.groupby(["plate", "date", "genotype"]).cumcount() + 1
+    ).astype(str)
+    df.attrs["measurement_method"] = request.settings.method
+    df.attrs["measurement_config"] = request.settings.to_dict()
+    df.attrs["measurement_settings_unit"] = request.settings_unit
+    df.attrs["calibration"] = request.calibration.to_dict()
+    df.attrs["overview_path"] = {
+        date: date_data["overview_path"]
+        for date, date_data in preflight_dict["dates"].items()
+    }
+    return df
+
+
+def _write_plate_run_outputs(
+    plate_dir: pathlib.Path,
+    output_dir: pathlib.Path,
+    df: pd.DataFrame,
+    request: workflow.AnalysisRequest,
+    *,
+    dataframe_source: Literal["computed", "cache", "merged"] = "computed",
+) -> dict[str, pathlib.Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataframe_path = output_dir / "dataframe.pickle"
+    excel_path = output_dir / "summary.xlsx"
+    pdf_path = output_dir / "summary.pdf"
+    df.to_pickle(dataframe_path)
+    df.to_excel(excel_path, index=False)
+    details = build_analysis_details(
+        "plate",
+        plate_dir,
+        pdf_path,
+        df,
+        request.settings,
+        dataframe_source=dataframe_source,
+    )
+    details.append(("Measurement settings unit", request.settings_unit))
+    details.append(("Calibration", json.dumps(request.calibration.to_dict())))
+    log_analysis_details(details)
+    with PdfPages(pdf_path) as pdf:
+        visualize.generate_analysis_details_page(
+            pdf,
+            details,
+            title=f"Analysis details - Plate {df['plate'].iloc[0]}",
+        )
+        visualize.generate_plateview(
+            pdf, df, measurement_method=request.settings.method
+        )
+    return {
+        "Data table": dataframe_path,
+        "Excel summary": excel_path,
+        "PDF summary": pdf_path,
+    }
+
+
+def _write_experiment_run_outputs(
+    experiment_path: pathlib.Path,
+    run_dir: pathlib.Path,
+    dataframes: list[pd.DataFrame],
+    request: workflow.AnalysisRequest,
+) -> tuple[pd.DataFrame, dict[str, pathlib.Path]]:
+    df = pd.concat(dataframes, ignore_index=True)
+    df.sort_values(["plate", "date", "genotype", "row", "col"], inplace=True)
+    df.attrs["measurement_method"] = request.settings.method
+    df.attrs["measurement_config"] = request.settings.to_dict()
+    df.attrs["measurement_settings_unit"] = request.settings_unit
+    df.attrs["calibration"] = request.calibration.to_dict()
+    dataframe_path = run_dir / "dataframe.pickle"
+    excel_path = run_dir / "summary.xlsx"
+    pdf_path = run_dir / "summary.pdf"
+    df.to_pickle(dataframe_path)
+    df.to_excel(excel_path, index=False)
+    details = build_analysis_details(
+        "experiment",
+        experiment_path,
+        pdf_path,
+        df,
+        request.settings,
+        dataframe_source="merged",
+    )
+    details.append(("Measurement settings unit", request.settings_unit))
+    details.append(("Calibration", json.dumps(request.calibration.to_dict())))
+    log_analysis_details(details)
+    with PdfPages(pdf_path) as pdf:
+        visualize.generate_analysis_details_page(
+            pdf, details, title="Analysis details - Experiment"
+        )
+        visualize.generate_experimentview(pdf, df)
+    return df, {
+        "Data table": dataframe_path,
+        "Excel summary": excel_path,
+        "PDF summary": pdf_path,
+    }
+
+
+def run_analysis(
+    request: workflow.AnalysisRequest,
+    *,
+    progress: workflow.ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> workflow.RunResult:
+    """Execute one immutable, manifest-backed plate or experiment run."""
+    cancel = cancel_event or threading.Event()
+    run_id, run_dir = workflow.create_run_directory(request.input_path)
+    manifest_path = run_dir / "run.json"
+    log_path = run_dir / "analysis.log"
+    calibration_path = run_dir / "calibration_report.csv"
+    started_at = workflow.utc_now_text()
+    stats = _RunStats()
+    outputs: dict[str, pathlib.Path] = {"Analysis log": log_path}
+    calibration_rows: list[dict[str, Any]] = []
+    manifest: dict[str, Any] = {
+        "schema_version": workflow.RUN_SCHEMA_VERSION,
+        "app_version": io.__version__,
+        "run_id": run_id,
+        "status": "running",
+        "started_at": started_at,
+        "finished_at": None,
+        "request": request.to_manifest_dict(),
+        "stats": {},
+        "outputs": {},
+        "message": "Analysis is running.",
+    }
+    workflow.atomic_write_json(manifest_path, manifest)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s  %(levelname)s  %(message)s")
+    )
+    io.logger.addHandler(file_handler)
+    status: workflow.RunStatus = "failed"
+    message = "Analysis failed."
+
+    try:
+        _emit_progress(
+            progress,
+            workflow.ProgressEvent(
+                "validation", message="Checking the selected folder"
+            ),
+        )
+        validation = workflow.validate_folder(request.input_path)
+        if not validation.valid or validation.kind != request.input_kind:
+            detail = "; ".join(validation.details)
+            raise ValueError(validation.message + (f" {detail}" if detail else ""))
+        if cancel.is_set():
+            raise workflow.AnalysisCancelled()
+
+        plate_dirs = (
+            [request.input_path]
+            if request.input_kind == "plate"
+            else sorted(
+                path for path in request.input_path.glob("plate_*") if path.is_dir()
+            )
+        )
+        preflights: list[tuple[pathlib.Path, dict[str, Any], bool]] = []
+        for index, plate_dir in enumerate(plate_dirs, 1):
+            if cancel.is_set():
+                raise workflow.AnalysisCancelled()
+            preflight, reused_preflight = _load_run_preflight(
+                plate_dir, request.reuse_policy
+            )
+            preflight_key = (
+                "preflights_reused" if reused_preflight else "preflights_recomputed"
+            )
+            stats.artifact_counts[preflight_key] = (
+                stats.artifact_counts.get(preflight_key, 0) + 1
+            )
+            preflights.append((plate_dir, preflight, reused_preflight))
+            _emit_progress(
+                progress,
+                workflow.ProgressEvent(
+                    "validation",
+                    index,
+                    len(plate_dirs),
+                    f"Validated {plate_dir.name}",
+                    plate=plate_dir.name,
+                ),
+            )
+        stats.total = sum(
+            len(date_data["fluos"])
+            for _plate, preflight, _reused in preflights
+            for date_data in preflight["dates"].values()
+        )
+        if stats.total == 0:
+            raise ValueError("No referenced images are available to measure")
+
+        plate_dataframes: list[pd.DataFrame] = []
+        plate_outputs: dict[str, dict[str, str]] = {}
+        for plate_dir, preflight, _reused_preflight in preflights:
+            records = _measure_plate_for_run(
+                preflight,
+                request,
+                stats,
+                calibration_rows,
+                progress,
+                cancel,
+            )
+            if cancel.is_set():
+                raise workflow.AnalysisCancelled()
+            if not records:
+                io.logger.error(f"No images could be measured for {plate_dir.name}")
+                continue
+            _emit_progress(
+                progress,
+                workflow.ProgressEvent(
+                    "aggregation",
+                    stats.completed,
+                    stats.total,
+                    f"Calculating derived values for {plate_dir.name}",
+                    plate=plate_dir.name,
+                    reused=stats.reused,
+                    skipped=stats.skipped,
+                    errors=stats.errors,
+                ),
+            )
+            df = _prepare_result_dataframe(records, preflight, request)
+            plate_dataframes.append(df)
+            output_dir = (
+                run_dir
+                if request.input_kind == "plate"
+                else run_dir / "plates" / plate_dir.name
+            )
+            _emit_progress(
+                progress,
+                workflow.ProgressEvent(
+                    "reporting",
+                    stats.completed,
+                    stats.total,
+                    f"Writing reports for {plate_dir.name}",
+                    plate=plate_dir.name,
+                    reused=stats.reused,
+                    skipped=stats.skipped,
+                    errors=stats.errors,
+                ),
+            )
+            try:
+                current_outputs = _write_plate_run_outputs(
+                    plate_dir,
+                    output_dir,
+                    df,
+                    request,
+                    dataframe_source=(
+                        "cache"
+                        if stats.reused and stats.reused == len(records)
+                        else "computed"
+                    ),
+                )
+            except Exception as ex:
+                stats.errors += 1
+                io.logger.error(f"Could not write reports for {plate_dir.name}: {ex}")
+                current_outputs = {}
+            if request.input_kind == "plate":
+                outputs.update(current_outputs)
+            else:
+                plate_outputs[plate_dir.name] = {
+                    name: str(path.relative_to(run_dir))
+                    for name, path in current_outputs.items()
+                }
+
+        if cancel.is_set():
+            raise workflow.AnalysisCancelled()
+        if not plate_dataframes:
+            raise ValueError("No images could be measured in the selected folder")
+        if request.input_kind == "experiment":
+            _emit_progress(
+                progress,
+                workflow.ProgressEvent(
+                    "aggregation",
+                    stats.completed,
+                    stats.total,
+                    "Merging plate results",
+                    reused=stats.reused,
+                    skipped=stats.skipped,
+                    errors=stats.errors,
+                ),
+            )
+            _merged, experiment_outputs = _write_experiment_run_outputs(
+                request.input_path, run_dir, plate_dataframes, request
+            )
+            outputs.update(experiment_outputs)
+            manifest["plate_outputs"] = plate_outputs
+
+        status = (
+            "completed_with_warnings" if stats.skipped or stats.errors else "completed"
+        )
+        message = (
+            "Analysis completed with warnings."
+            if status == "completed_with_warnings"
+            else "Analysis completed successfully."
+        )
+    except workflow.AnalysisCancelled:
+        status = "cancelled"
+        message = "Analysis cancelled after the current image."
+        io.logger.warning(message)
+    except Exception as ex:
+        status = "failed"
+        message = f"Analysis failed: {ex}"
+        io.logger.exception(message)
+        stats.errors += 1
+    finally:
+        columns = [
+            "image",
+            "calibration_mode",
+            "calibration_status",
+            "x_um_per_pixel",
+            "y_um_per_pixel",
+            "calibration_um_per_pixel",
+            "calibration_message",
+            "embedded_metadata_status",
+            "embedded_metadata_message",
+            "measurement_status",
+            "detail",
+        ]
+        pd.DataFrame(calibration_rows, columns=columns).to_csv(
+            calibration_path, index=False
+        )
+        outputs["Calibration report"] = calibration_path
+        io.logger.removeHandler(file_handler)
+        file_handler.close()
+
+    manifest.update(
+        {
+            "status": status,
+            "finished_at": workflow.utc_now_text(),
+            "stats": {
+                "total": stats.total,
+                "completed": stats.completed,
+                "reused_measurements": stats.reused,
+                "recomputed_measurements": stats.recomputed,
+                "skipped": stats.skipped,
+                "errors": stats.errors,
+                **stats.artifact_counts,
+            },
+            "outputs": {
+                name: str(path.relative_to(run_dir))
+                for name, path in outputs.items()
+                if path.exists()
+            },
+            "message": message,
+        }
+    )
+    workflow.atomic_write_json(manifest_path, manifest)
+    return workflow.RunResult(
+        run_id=run_id,
+        run_dir=run_dir,
+        status=status,
+        outputs={name: path for name, path in outputs.items() if path.exists()},
+        total=stats.total,
+        completed=stats.completed,
+        reused=stats.reused,
+        recomputed=stats.recomputed,
+        skipped=stats.skipped,
+        errors=stats.errors,
+        message=message,
+    )

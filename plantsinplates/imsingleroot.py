@@ -871,6 +871,7 @@ def measure_image(
     path: pathlib.Path,
     measurement_config: MeasurementConfig = MeasurementConfig(),
     reuse_artifacts: bool = True,
+    artifact_stats: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     source_signature = io.build_source_signature(path)
     manifest = io.read_artifact_manifest(path) if reuse_artifacts else {}
@@ -907,6 +908,10 @@ def measure_image(
             "source": source_signature,
         }
         io.write_artifact_manifest(path, manifest)
+
+    if artifact_stats is not None:
+        key = "masks_reused" if reuse_mask else "masks_recomputed"
+        artifact_stats[key] = artifact_stats.get(key, 0) + 1
 
     if measurement_config.method == "box":
         return _measure_image(im, mask, measurement_config, None)
@@ -958,5 +963,9 @@ def measure_image(
             "source": source_signature,
         }
         io.write_artifact_manifest(path, manifest)
+
+    if artifact_stats is not None:
+        key = "skeletons_reused" if reuse_skeleton else "skeletons_recomputed"
+        artifact_stats[key] = artifact_stats.get(key, 0) + 1
 
     return _measure_image(im, mask, measurement_config, skeleton)

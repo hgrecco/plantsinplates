@@ -3,10 +3,15 @@
 Turn organized fluorescence microscopy images into a clear view of root signal
 and growth over time.
 
+![Plants in Plates icon](https://github.com/plantsinplates/assets/plantinplates_icon_128.png)
+
 Plants in Plates helps plant researchers analyze individual-root fluorescence
 images across plates and dates, then share the result as Excel tables and PDF
 reports. It combines the fluorescence signal measured from each image with the
 root lengths already recorded in the plate workbook.
+
+> [!WARNING]
+> **PlantinPlates is under active development.** Its interface, analysis behavior, configuration formats, and generated outputs may change between versions.
 
 ## What it can do for you
 
@@ -28,8 +33,9 @@ root lengths already recorded in the plate workbook.
    an `info.xlsx` workbook in each plate folder.
 1. Open the desktop application, select a plate or whole experiment, choose a
    measurement method, and analyze it.
-1. Review the generated `_output_summary.xlsx` and `_output_summary.pdf`
-   files, or use the pickle dataframes in a notebook.
+1. Review the new `_output_<timestamp>-<unique-id>` run folder. It contains the
+   Excel/PDF summaries, dataframe, calibration report, log, and reproducibility
+   manifest without overwriting an earlier run.
 
 The software reads individual fluorescence images referenced as `.czi` files.
 It does not calculate root length from those images: length is supplied in
@@ -43,6 +49,9 @@ Install the locked Pixi environment, then open the source version of the GUI:
 pixi install
 pixi run gui-dev /absolute/path/to/experiment_014
 ```
+
+The desktop uses the cross-platform `ttkbootstrap` Litera theme, which is
+installed automatically with the locked Pixi environment.
 
 Prefer a non-interactive run? Analyze a whole experiment or one plate directly:
 
@@ -58,14 +67,15 @@ automated test suite.
 - [Deep-dive guide](docs/guide.md): installation, input workbook and folder
   contract, calibration, measurement options, outputs, caches, all Pixi tasks,
   troubleshooting, and contributing.
-- [Mathematical summary](docs/MATH.md): measurement models and derived
+- [Mathematical summary](docs/math.md): measurement models and derived
   quantities.
-- [Input-structure reference](docs/estructura.docx): data-layout reference.
+- [Data organization](docs/data_organization.md): canonical folder, workbook,
+  image-path, calibration-file, output, and cache layout.
 
 ## Project status and license
 
 The repository includes a working application, but no formal stability, support,
-contribution, or release policy. Its runtime reports version `2026.04.15`;
+contribution, or release policy. Its runtime reports version `2026.07.17`;
 Pixi's project metadata lists `0.1.0`.
 
 Plants in Plates is available under the [MIT License](LICENSE).

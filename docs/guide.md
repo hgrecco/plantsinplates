@@ -33,12 +33,12 @@ Root length is **not** measured from the microscopy image by this code. The
 `length` values used in rate calculations come from `info.xlsx`.
 
 For the mathematical description of the implemented measurement models and
-derived time-series values, see [MATH.md](MATH.md).
+derived time-series values, see [math.md](math.md).
 
 ## Status
 
 No formal stability, support, or release policy is included in this repository.
-The runtime reports version `2026.04.15` with `pixi run show-version`,
+The runtime reports version `2026.07.17` with `pixi run show-version`,
 while the Pixi project metadata is `0.1.0`; the repository does not explain this
 version difference.
 
@@ -78,31 +78,9 @@ tree. The `gui` task instead runs the bundled `plantsinplates-app` ZIP archive.
 
 ## Quick start
 
-Create an experiment directory whose names and workbook date prefixes match.
-For example:
-
-```text
-experiment_014/
-├── cal.txt                                # optional: one positive µm/pixel value
-└── plate_002_treatment/
-    ├── info.xlsx
-    └── date_20250613.0930/
-        ├── overview.png                   # optional plate overview
-        └── row_001/
-            └── fluo_1_1.czi
-```
-
-The first worksheet in `info.xlsx` needs at least `row`, `col`, and `genotype`,
-plus paired date columns. The date prefix must match the identifier after
-`date_` in the corresponding directory.
-
-| row | col | genotype | 20250613.0930_length | 20250613.0930_fluo |
-| --- | --- | --- | ---: | --- |
-| 1 | 1 | 606-CC1 | 12.4 | `row_001/fluo_1_1.czi` |
-
-The fluorescence path is relative to its `date_*` directory and must use
-forward slashes (`/`). Date keys use `YYYYMMDD` and may include `.HHmm`, such
-as `20250613.0930`.
+Prepare an experiment or plate using the folder, workbook, image-path, and
+calibration-file contract in [Data organization](data_organization.md). That
+page is the canonical reference for input and managed-output placement.
 
 Run the experiment from the command line:
 
@@ -110,8 +88,10 @@ Run the experiment from the command line:
 pixi run test /absolute/path/to/experiment_014
 ```
 
-This creates plate outputs under each `plate_*` directory and merged outputs in
-the experiment directory. To run one plate only, pass its `plate_*` path.
+This creates one managed run directory in the selected experiment. To run one
+plate only, pass its `plate_*` path. See
+[Data organization](data_organization.md#managed-outputs-and-cache-directories)
+for the exact placement.
 
 ## Common usage
 
@@ -121,18 +101,31 @@ the experiment directory. To run one plate only, pass its `plate_*` path.
 pixi run gui-dev /absolute/path/to/experiment_014
 ```
 
-The GUI guides you through choosing a valid `experiment_*` or `plate_*` folder,
-confirming image calibration, choosing a measurement method, and adjusting only
-the settings relevant to that method. Select **Analyze experiment** or
-**Analyze plate** when the required inputs are valid. Size settings are shown in
-micrometers and converted to pixels using the displayed calibration. A valid
-`cal.txt` is read-only; otherwise the calibration can be entered manually.
+The GUI has five stages: data folder and previous runs, calibration, method and
+settings, run analysis, and results. The folder path can be pasted or selected
+with the browser. **Open folder** opens even a structurally invalid selection,
+and **Re-check** performs a fresh workbook/date/image-reference check after the
+input has been repaired.
 
-The **Reuse valid previous results** option keeps compatible output artifacts;
-turn it off to force recalculation. **Delete previous output…** shows every
-generated artifact for confirmation before removing it. After a run, the
-Results panel provides the output path, available Excel/PDF actions, and a
-collapsible Technical log for detailed diagnostics.
+The interface uses `ttkbootstrap` with the light Litera theme for consistent
+cross-platform controls, status colors, focus states, and spacing. Pixi installs
+the themed widget dependency from the lockfile; no separate GUI package setup is
+required.
+
+Calibration is an explicit choice between per-image CZI metadata, one shared
+`cal.txt` value, or one manually entered shared value. **Check image
+calibrations** is optional and scans all referenced images without starting an
+analysis. In metadata mode an unusable or non-square calibration causes only
+that image to be skipped; it is recorded in the run's calibration report.
+Visible size settings are micrometers and are converted separately for every
+image when metadata calibration is selected.
+
+The method-specific fields sit directly under the selected method. Before
+starting, the GUI summarizes the image count, calibration/audit state, method,
+reuse policy, and proposed output location. During measurement it reports
+image-level progress and supports cancellation after the current image.
+Previous runs are listed beside the folder selection, where their settings can
+be inspected and explicitly loaded.
 
 ### Batch analysis
 
@@ -156,63 +149,39 @@ the tip, positive values shift it toward the tip direction, and negative values
 shift it away. Set `--intensity-savgol-window 0` to disable longitudinal profile
 smoothing.
 
-Force new artifacts and summaries when required:
+Choose cache behavior when required:
 
 ```console
-pixi run test /absolute/path/to/plate_002_treatment --method centerline --force-recompute
+pixi run test /absolute/path/to/plate_002_treatment --method centerline --reuse-policy none
 ```
 
-For the batch command, `--force-recompute` first deletes all generated
-`_output_*` entries below the target directory. Treat it as a destructive
-operation on generated results.
+`--reuse-policy` accepts `compatible`, `preprocessing`, or `none`. It never
+deletes a previous run. Batch method settings remain pixel-based and therefore
+do not require physical calibration.
 
 ### Outputs
 
-Analysis writes generated files with the `_output_` prefix:
-
-```text
-experiment_014/
-├── _output_df.pickle                      # merged experiment dataframe
-├── _output_summary.pdf                    # experiment report
-└── plate_002_treatment/
-    ├── _output_df.pickle                  # plate dataframe
-    ├── _output_manifest.json              # image artifact cache metadata
-    ├── _output_preflight.pickle           # metadata/filesystem matching result
-    ├── _output_summary.pdf                # plate report
-    ├── _output_summary.xlsx               # plate table for Excel
-    └── date_20250613.0930/row_001/
-        ├── _output_mask/fluo_1_1.png      # root mask
-        └── _output_skeleton/fluo_1_1.png  # centerline modes only
-```
+Every invocation creates a unique, immutable
+`_output_YYYYMMDD-HHMMSS-<id>` directory. It contains `run.json`,
+`analysis.log`, `calibration_report.csv`, `dataframe.pickle`, `summary.xlsx`,
+and `summary.pdf`. Experiment runs also contain plate-specific results below
+`plates/<plate-name>/`. The complete directory trees are documented in
+[Data organization](data_organization.md#managed-outputs-and-cache-directories).
 
 The plate dataframe includes the supplied `length`, derived fluorescence signal,
 per-plant differences and rates, such as `delta_length_per_day` and
 `delta_signal_intensity_per_day`. Centerline modes also record centerline and
-regional measurements. A GUI run additionally saves its visible log as
-`_output_log.txt` in the selected folder.
+regional measurements. Calibration provenance and the resolved pixel
+configuration are stored per image. Plate-only runs use the same file names at
+the top of their unique run directory.
 
 ## Configuration
 
 ### Data layout
 
-The source code expects the following naming convention:
-
-- `experiment_<number>[_description]` contains one or more `plate_*`
-  directories.
-- `plate_<number>[_description]` contains `info.xlsx` and one or more
-  `date_<date-key>[_description]` directories.
-- Each date key must match the prefix of the paired `<date-key>_length` and
-  `<date-key>_fluo` columns in `info.xlsx`. In practice, use names such as
-  `20250613` or `20250613.0930`.
-- The preflight scan matches referenced CZI files by their path relative to the
-  date directory. Unreferenced or missing files are reported in the preflight
-  data rather than measured.
-- An optional `overview.jpg`, `.jpeg`, `.tiff`, `.tif`, or `.png` in a date
-  directory is included in the plate report when found.
-
-The corresponding English input-structure reference is
-[estructura.docx](estructura.docx). `Datos VAMP721.docx` contains
-experiment-specific background, not a general installation guide.
+See [Data organization](data_organization.md) for the complete and authoritative
+directory tree, naming conventions, `info.xlsx` schema, relative image paths,
+validation rules, calibration-file placement, and managed output/cache layout.
 
 ### Calibration and environment
 
@@ -224,20 +193,21 @@ DATA_DIR=/absolute/path/to/experiment_014 pixi run gui-dev
 DATA_DIR=/absolute/path/to/plate_002_treatment pixi run test
 ```
 
-An optional `cal.txt` can contain exactly one positive finite number representing
-micrometers per pixel. The GUI looks first in the selected folder; when a plate
-is selected, it falls back to `cal.txt` in its parent `experiment_*` folder. A
-valid calibration is read-only in the GUI; otherwise the default `1.0` is
-editable. The batch command does not read `cal.txt`, because its measurement
-options are already expressed in pixels.
+The calibration source remains explicit: image metadata, a shared `cal.txt`, or
+a manual shared value. See [Data organization](data_organization.md) for
+`cal.txt` content and placement. Embedded CZI X/Y values must both be positive
+and agree within 1%; greater anisotropy is unsupported by the current
+square-pixel algorithms. The batch command does not read `cal.txt`, because its
+method options are already pixels.
 
 ### Artifact reuse
 
-Artifact reuse is enabled by default. Root masks and centerlines are reused only
-when their source file size/modification time and relevant artifact settings
-match. Cached plate dataframes are reused only when the saved measurement
-configuration matches the active configuration. Disable reuse with
-`--force-recompute` in the CLI or the GUI checkbox.
+Reusable work lives under `.plantsinplates_cache` in each plate. The default
+**Reuse compatible work** policy can reuse preflight data, masks, centerlines,
+and complete image measurements when their source signatures, calibration,
+settings, and cache schema match. **Recompute measurements** reuses only
+preprocessing. **Recompute everything** ignores the cache without deleting it.
+Completed run directories are never cache inputs and are never overwritten.
 
 ## Repository structure
 
@@ -250,22 +220,18 @@ configuration matches the active configuration. Disable reuse with
 │   ├── immultiroot.py          # centerline helpers and multi-root utilities
 │   ├── io.py                   # image I/O, output naming, artifact cache
 │   ├── measurement_config.py   # validated measurement configuration
+│   ├── workflow.py             # validation, calibration, runs, progress models
 │   └── visualize.py            # PDF report generation
 ├── docs/                       # user, mathematical, and data-structure docs
-│   ├── MATH.md                 # measurement-model summary
-│   ├── estructura.docx         # English input-structure reference
-│   └── guide.md                # detailed operating guide
-├── examples/                   # exploratory Jupyter notebooks
+│   ├── data_organization.md    # canonical data-layout reference
+│   ├── guide.md                # detailed operating guide
+│   └── math.md                 # measurement-model summary
+├── tests/                      # workflow and GUI decision-logic tests
 ├── pixi.toml                   # environments and task definitions
 ├── pixi.lock                   # locked dependency resolution
 ├── plantsinplates-app          # bundled application ZIP archive
 └── .pre-commit-config.yaml     # formatting and lint hooks
 ```
-
-The notebooks are examples and exploratory work, not a supported test suite.
-Several use local, machine-specific paths or imports that are not declared in
-`pixi.toml`; use `examples/new_format.ipynb` as the closest example of the
-current plate-analysis workflow.
 
 ## Development, testing, and formatting
 
@@ -286,32 +252,25 @@ update application files need the appropriate external server access.
 | `pixi run -e lint pre-commit-install` | Install repository pre-commit hooks. |
 | `pixi run -e lint lint` | Run the configured pre-commit checks. |
 
-The lint environment supplies Ruff, mdformat, Taplo, and pre-commit hooks. No
-`tests/` directory, pytest configuration, or automated unit/integration test
-command is present. Use a representative plate or experiment with the batch
-analysis command to validate a workflow change.
+The lint environment supplies Ruff, mdformat, Taplo, and pre-commit hooks. Run
+the automated suite with `pixi run python -m unittest discover -s tests`, and
+use a representative plate or experiment with the batch analysis command for
+scientific workflow validation.
 
 ## Troubleshooting
 
-### No matching date columns
+### Folder or workbook validation fails
 
-The date key after `date_` must be identical to the prefix of both workbook
-columns. For example, `date_20250613.0930` needs
-`20250613.0930_length` and `20250613.0930_fluo`.
-
-### Images are not measured
-
-Check that each non-empty `*_fluo` cell names an existing lowercase `.czi` file
-relative to its date directory, such as `row_001/fluo_1_1.czi`. Use forward
-slashes in the workbook path. The analyzer logs an error per image and continues
-with the remaining records.
+Use the validation checklist in [Data organization](data_organization.md) to
+check folder prefixes, date keys, workbook column pairs, and relative image
+paths. After repairing the dataset, select **Re-check** in the GUI.
 
 ### Results look stale or settings changed
 
-Use `--force-recompute` for the batch command, or disable **Reuse output
-artifacts** in the GUI. If needed, use the GUI's **Delete previous output**
-button; it removes generated entries beginning with `_output_` below the chosen
-folder.
+Choose **Recompute measurements** or **Recompute everything** in the GUI, or
+pass `--reuse-policy preprocessing`/`none` to the batch command. This creates a
+new run and leaves earlier results untouched. Use **Clear reusable cache…** only
+when the reusable preprocessing itself should be removed.
 
 ### The GUI does not start
 
@@ -321,10 +280,10 @@ used instead of the bundled archive.
 
 ### Parameter units are unexpected
 
-The GUI accepts the visible size settings in micrometers and converts them with
-`cal.txt` or the editable calibration field. The batch command accepts the same
-settings in pixels. Do not copy a GUI value into the batch command without
-performing that conversion.
+The GUI accepts visible size settings in micrometers and converts them with the
+explicit metadata, `cal.txt`, or manual calibration source. The batch command
+accepts the same settings in pixels. Do not copy a GUI value into the batch
+command without performing that conversion.
 
 ## Contributing
 

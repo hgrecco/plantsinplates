@@ -1,15 +1,16 @@
-import pathlib
-import shutil
 import json
+import hashlib
+import logging
+import pathlib
+from typing import Any
+
 import bioio_czi
 from skimage import io as skio
 
-import logging
-from typing import Any
-
 from .types import IntensityImage, is_intensity_image
+from .workflow import CACHE_DIRECTORY
 
-__version__ = "2026.04.15"
+__version__ = "2026.07.17"
 
 PREFIX = "_output_"
 
@@ -32,9 +33,8 @@ def build_mask_path(image_path: pathlib.Path) -> pathlib.Path:
     pathlib.Path
         Path where the corresponding mask file should be stored.
     """
-    mask_folder = image_path.parent / f"{PREFIX}mask"
-    mask_path = mask_folder / (image_path.stem + ".png")
-    return mask_path
+    cache_root, relative = _image_cache_location(image_path)
+    return cache_root / "images" / relative.parent / (relative.stem + ".mask.png")
 
 
 def build_skeleton_path(image_path: pathlib.Path) -> pathlib.Path:
@@ -50,9 +50,8 @@ def build_skeleton_path(image_path: pathlib.Path) -> pathlib.Path:
     pathlib.Path
         Path where the corresponding skeleton file should be stored.
     """
-    skeleton_folder = image_path.parent / f"{PREFIX}skeleton"
-    skeleton_path = skeleton_folder / (image_path.stem + ".png")
-    return skeleton_path
+    cache_root, relative = _image_cache_location(image_path)
+    return cache_root / "images" / relative.parent / (relative.stem + ".skeleton.png")
 
 
 def build_artifact_manifest_path(image_path: pathlib.Path) -> pathlib.Path:
@@ -64,10 +63,43 @@ def build_artifact_manifest_path(image_path: pathlib.Path) -> pathlib.Path:
     """
     plate_dir = find_parent_plate_dir(image_path)
     if plate_dir is not None:
-        return plate_dir / f"{PREFIX}manifest.json"
+        return plate_dir / CACHE_DIRECTORY / "artifact_manifest.json"
 
-    manifest_folder = image_path.parent / f"{PREFIX}manifest"
-    return manifest_folder / (image_path.name + ".json")
+    return image_path.parent / CACHE_DIRECTORY / "artifact_manifest.json"
+
+
+def _image_cache_location(
+    image_path: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Return a cache root and stable image-relative path."""
+    plate_dir = find_parent_plate_dir(image_path)
+    if plate_dir is None:
+        return image_path.parent / CACHE_DIRECTORY, pathlib.Path(image_path.name)
+    try:
+        relative = image_path.relative_to(plate_dir)
+    except ValueError:
+        relative = pathlib.Path(image_path.name)
+    return plate_dir / CACHE_DIRECTORY, relative
+
+
+def build_preflight_cache_path(plate_dir: pathlib.Path) -> pathlib.Path:
+    return plate_dir / CACHE_DIRECTORY / "preflight.pickle"
+
+
+def build_measurement_cache_path(
+    image_path: pathlib.Path, cache_key: dict[str, Any]
+) -> pathlib.Path:
+    """Build a content-keyed cache path for a complete image measurement."""
+    cache_root, relative = _image_cache_location(image_path)
+    encoded = json.dumps(cache_key, sort_keys=True, default=str).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()[:20]
+    return (
+        cache_root
+        / "measurements"
+        / relative.parent
+        / relative.stem
+        / f"{digest}.pickle"
+    )
 
 
 def build_preflight_path(folder: pathlib.Path) -> pathlib.Path:
@@ -297,7 +329,7 @@ def find_file_with_extension(
 
 
 def delete_cache(folder: pathlib.Path) -> None:
-    """Delete all cache files and folders in the given directory.
+    """Delete managed reusable caches without touching immutable run folders.
 
     Parameters
     ----------
@@ -306,17 +338,17 @@ def delete_cache(folder: pathlib.Path) -> None:
 
     Notes
     -----
-    Files and folders starting with the global `PREFIX` will be deleted.
+    This compatibility helper now has the same safe scope as the GUI's
+    ``Clear reusable cache`` action.  Legacy ``_output_*`` files and managed
+    run directories are intentionally left untouched.
     """
-    for p in folder.rglob(f"{PREFIX}*"):
-        if p.is_file():
-            p.unlink()
-        else:
-            shutil.rmtree(p, ignore_errors=True)
+    from .workflow import clear_reusable_cache
+
+    clear_reusable_cache(folder)
 
 
 def count_output_artifacts(folder: pathlib.Path) -> int:
-    """Count generated output artifacts under the given folder.
+    """Count manifest-backed run directories directly under the given folder.
 
     Parameters
     ----------
@@ -326,11 +358,15 @@ def count_output_artifacts(folder: pathlib.Path) -> int:
     Returns
     -------
     int
-        Number of filesystem entries matching the output prefix.
+        Number of managed run directories. Legacy output files are ignored.
     """
     if not folder.exists():
         return 0
-    return sum(1 for _ in folder.rglob(f"{PREFIX}*"))
+    return sum(
+        1
+        for path in folder.glob(f"{PREFIX}*")
+        if path.is_dir() and (path / "run.json").is_file()
+    )
 
 
 def has_output_artifacts(folder: pathlib.Path) -> bool:

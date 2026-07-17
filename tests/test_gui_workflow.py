@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from openpyxl import Workbook
+import ttkbootstrap as ttk
 
 
 ROOT = pathlib.Path(__file__).parents[1]
@@ -27,7 +28,20 @@ def write_info(path: pathlib.Path) -> None:
     workbook.save(path)
 
 
+def write_referenced_image(plate: pathlib.Path, date: str = "20260101") -> None:
+    image = plate / f"date_{date}" / "row_001" / "fluo_1_1.czi"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"test image placeholder")
+
+
 class WorkflowValidationTests(unittest.TestCase):
+    def test_gui_uses_themed_window_and_spacing_scale(self) -> None:
+        self.assertTrue(issubclass(gui.AnalyzeApp, ttk.Window))
+        self.assertEqual(
+            (gui.SPACE_XS, gui.SPACE_SM, gui.SPACE_MD, gui.SPACE_LG),
+            (4, 8, 16, 24),
+        )
+
     def test_method_dependent_fields_are_clear_and_complete(self) -> None:
         app = object.__new__(gui.AnalyzeApp)
         app.method_var = type("Variable", (), {"get": lambda self: "box"})()
@@ -55,7 +69,7 @@ class WorkflowValidationTests(unittest.TestCase):
             self.assertFalse(missing.valid)
             self.assertEqual(missing.state, "inconsistent")
             write_info(plate / "info.xlsx")
-            (plate / "date_20260101").mkdir()
+            write_referenced_image(plate)
             valid = gui.validate_folder(plate)
             self.assertTrue(valid.valid)
             self.assertEqual(valid.message.split(" — ")[0], "Valid plate")
@@ -69,8 +83,8 @@ class WorkflowValidationTests(unittest.TestCase):
             result = gui.validate_folder(plate)
             self.assertFalse(result.valid)
             self.assertEqual(result.state, "inconsistent")
-            self.assertIn("info.xlsx was found", result.message)
-            self.assertIn("missing date folders: 20260101", result.details[0])
+            self.assertIn("inconsistent", result.message)
+            self.assertIn("missing date folders: 20260101", result.details)
 
     def test_plate_validation_matches_analysis_date_folder_parsing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -79,6 +93,9 @@ class WorkflowValidationTests(unittest.TestCase):
             write_info(plate / "info.xlsx")
             nested_date = plate / "images" / "date_20260101_control"
             nested_date.mkdir(parents=True)
+            image = nested_date / "row_001" / "fluo_1_1.czi"
+            image.parent.mkdir()
+            image.write_bytes(b"test image placeholder")
             result = gui.validate_folder(plate)
             self.assertTrue(result.valid)
 
@@ -124,17 +141,13 @@ class WorkflowValidationTests(unittest.TestCase):
             self.assertEqual(source, "Manual value")
             self.assertIn("Invalid cal.txt", error)
 
-    def test_delete_confirmation_lists_only_generated_output(self) -> None:
+    def test_run_discovery_ignores_legacy_output_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = pathlib.Path(temporary) / "plate_001"
             folder.mkdir()
             (folder / "source.czi").write_text("input", encoding="utf-8")
             (folder / "_output_summary.pdf").write_text("output", encoding="utf-8")
-            shell = object.__new__(gui.AnalyzeApp)
-            shell.selected_folder = folder
-            message = shell.deletion_message()
-            self.assertIn("_output_summary.pdf", message)
-            self.assertNotIn("source.czi", message)
+            self.assertEqual(gui.workflow.discover_runs(folder), [])
 
     def test_completion_feedback_is_successful_or_actionable(self) -> None:
         self.assertEqual(
