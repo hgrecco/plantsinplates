@@ -15,6 +15,7 @@ from .measurement_config import MeasurementConfig
 from . import visualize
 
 THRESHOLD = 100
+CENTERLINE_METHODS = {"centerline", "centerline_gaussian"}
 CENTERLINE_REGION_COLUMNS = [
     "skel_cap_present",
     "skel_cap_start_idx",
@@ -37,6 +38,14 @@ CENTERLINE_REGION_COLUMNS = [
     "skel_far_mean",
     "skel_far_integrated",
     "skel_far_count",
+]
+CENTERLINE_GAUSSIAN_COLUMNS = [
+    "skel__peak_coordinates",
+    "skel__peak_left_coordinates",
+    "skel__peak_right_coordinates",
+    "skel__gauss_peak",
+    "skel__gauss_offset",
+    "skel__gauss_sigma",
 ]
 
 
@@ -496,12 +505,20 @@ def analyze_plate_folder(
         cached_config = df.attrs.get("measurement_config", None)
         if cached_config == measurement_config.to_dict():
             use_cached_dataframe = True
-            if measurement_config.method == "centerline":
+            if measurement_config.method in CENTERLINE_METHODS:
                 missing_columns = [
                     column
                     for column in CENTERLINE_REGION_COLUMNS
                     if column not in df.columns
                 ]
+                if measurement_config.method == "centerline_gaussian":
+                    missing_columns.extend(
+                        [
+                            column
+                            for column in CENTERLINE_GAUSSIAN_COLUMNS
+                            if column not in df.columns
+                        ]
+                    )
                 if missing_columns:
                     use_cached_dataframe = False
                     io.logger.info(

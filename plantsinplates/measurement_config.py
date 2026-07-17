@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass
 from math import isfinite
 from typing import Literal
 
-type MeasurementMethod = Literal["box", "centerline"]
+type MeasurementMethod = Literal["box", "centerline", "centerline_gaussian"]
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,7 @@ class MeasurementConfig:
     intensity_savgol_window: int = 25
 
     def __post_init__(self):
-        if self.method not in ("box", "centerline"):
+        if self.method not in ("box", "centerline", "centerline_gaussian"):
             raise ValueError(f"Invalid method: {self.method}")
 
         if self.box_size <= 0:

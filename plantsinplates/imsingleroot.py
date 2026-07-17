@@ -2,7 +2,8 @@ from typing import Any, Callable
 import pathlib
 
 import numpy as np
-from scipy.signal import find_peaks, peak_prominences, savgol_filter
+from scipy.optimize import curve_fit
+from scipy.signal import savgol_filter
 from skimage import morphology, measure, io as skio
 from skimage.measure import regionprops
 
@@ -300,55 +301,154 @@ def _measure_region(
     }
 
 
-def _find_valley_index(
-    intensities: np.ndarray, left_peak_idx: int, right_peak_idx: int
-) -> int:
-    if right_peak_idx <= left_peak_idx:
-        return int(right_peak_idx)
+def _centerline_profile_model(
+    x: np.ndarray,
+    offset: float,
+    tip_peak: float,
+    tip_mu: float,
+    tip_sigma_left: float,
+    tip_sigma_right: float,
+    cap_peak: float,
+    cap_mu: float,
+    cap_sigma: float,
+) -> np.ndarray:
+    """Continuous model: asymmetric tip Gaussian + optional cap Gaussian."""
+    x = np.asarray(x, dtype=np.float64)
+    dx = x - float(tip_mu)
 
-    valley_segment = intensities[left_peak_idx : right_peak_idx + 1]
-    return int(left_peak_idx + int(np.argmin(valley_segment)))
+    sigma_left = max(float(tip_sigma_left), 1e-6)
+    sigma_right = max(float(tip_sigma_right), 1e-6)
+    cap_sigma_safe = max(float(cap_sigma), 1e-6)
 
+    tip_sigma = np.where(dx <= 0.0, sigma_left, sigma_right)
+    tip_component = float(tip_peak) * np.exp(-(dx**2) / (2.0 * tip_sigma**2))
 
-def _find_tip_right_boundary_without_cap(
-    intensities: np.ndarray, tip_peak_idx: int
-) -> int:
-    if tip_peak_idx >= len(intensities) - 1:
-        return int(len(intensities) - 1)
+    cap_component = float(cap_peak) * np.exp(
+        -((x - float(cap_mu)) ** 2) / (2.0 * cap_sigma_safe**2)
+    )
 
-    right = intensities[tip_peak_idx + 1 :]
-    local_minima, _ = find_peaks(-right)
-    if len(local_minima) > 0:
-        return int(tip_peak_idx + 1 + int(local_minima[0]))
-
-    right_min = float(np.min(right))
-    tip_height = float(intensities[tip_peak_idx])
-    target_intensity = tip_height - 0.5 * (tip_height - right_min)
-    candidates = np.where(right <= target_intensity)[0]
-    if len(candidates) > 0:
-        return int(tip_peak_idx + 1 + int(candidates[0]))
-
-    return int(len(intensities) - 1)
+    return float(offset) + tip_component + cap_component
 
 
-def _find_tip_left_boundary_at_target(
-    intensities: np.ndarray, tip_peak_idx: int, target_intensity: float
-) -> int:
-    for idx in range(tip_peak_idx, 0, -1):
-        value_left = float(intensities[idx - 1])
-        value_right = float(intensities[idx])
-        if (
-            value_left <= target_intensity <= value_right
-            or value_left >= target_intensity >= value_right
-        ):
-            if abs(value_right - target_intensity) <= abs(
-                value_left - target_intensity
-            ):
-                return idx
-            return idx - 1
+def _fit_centerline_profile(
+    profile: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float], bool]:
+    y = np.asarray(profile, dtype=np.float64)
+    n = len(y)
+    if n == 0:
+        return np.asarray([], dtype=np.float64), {}, False
 
-    left = intensities[: tip_peak_idx + 1]
-    return int(np.argmin(np.abs(left - target_intensity)))
+    x = np.arange(n, dtype=np.float64)
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+    y_range = max(y_max - y_min, 1e-9)
+
+    tip_mu0 = float(np.argmax(y))
+    tip_peak0 = max(y_max - y_min, 0.0)
+
+    tip_idx0 = int(round(tip_mu0))
+    left_points = max(tip_idx0, 1)
+    right_points = max(n - tip_idx0 - 1, 1)
+    sigma_left0 = max(left_points / 3.0, 1.0)
+    sigma_right0 = max(right_points / 5.0, 0.75)
+
+    if tip_idx0 < n - 1:
+        edge_width_prior = max(4, int(round(0.12 * n)))
+        edge_start = max(0, n - edge_width_prior)
+        edge_segment = y[edge_start:]
+        cap_idx0 = int(edge_start + int(np.argmax(edge_segment)))
+        cap_mu0 = float(cap_idx0)
+        baseline_segment = y[max(0, edge_start - edge_width_prior) : edge_start]
+        baseline0 = (
+            float(np.median(baseline_segment))
+            if baseline_segment.size > 0
+            else float(y_min)
+        )
+        cap_peak0 = max(float(y[cap_idx0] - baseline0), 0.0)
+        cap_sigma0 = max(float(edge_width_prior) / 6.0, 0.75)
+    else:
+        cap_mu0 = tip_mu0
+        cap_peak0 = 0.0
+        cap_sigma0 = 0.75
+
+    edge_width_prior = max(4, int(round(0.12 * n)))
+    edge_start = max(0, n - edge_width_prior)
+    cap_sigma_upper = max(1.0, float(edge_width_prior) / 2.0)
+
+    p0 = np.asarray(
+        [
+            y_min,
+            tip_peak0,
+            tip_mu0,
+            sigma_left0,
+            sigma_right0,
+            cap_peak0,
+            cap_mu0,
+            cap_sigma0,
+        ],
+        dtype=np.float64,
+    )
+
+    lower_bounds = np.asarray(
+        [
+            y_min - 2.0 * y_range,
+            0.0,
+            0.0,
+            0.5,
+            0.3,
+            0.0,
+            float(edge_start),
+            0.3,
+        ],
+        dtype=np.float64,
+    )
+    upper_bounds = np.asarray(
+        [
+            y_max + 2.0 * y_range,
+            np.inf,
+            float(n - 1),
+            float(max(n, 2)),
+            float(max(n, 2)),
+            np.inf,
+            float(max(n - 1, 1)),
+            float(cap_sigma_upper),
+        ],
+        dtype=np.float64,
+    )
+    p0 = np.clip(p0, lower_bounds, upper_bounds)
+
+    if n < 6:
+        popt = p0
+        fit_ok = False
+    else:
+        try:
+            popt, _ = curve_fit(
+                _centerline_profile_model,
+                x,
+                y,
+                p0=p0,
+                bounds=(lower_bounds, upper_bounds),
+                maxfev=10000,
+            )
+            fit_ok = True
+        except Exception:
+            popt = p0
+            fit_ok = False
+
+    fitted = _centerline_profile_model(x, *popt)
+    tip_mu = float(np.clip(popt[2], 0.0, n - 1))
+    cap_mu = float(np.clip(popt[6], 0.0, n - 1))
+    params = {
+        "offset": float(popt[0]),
+        "tip_peak": float(max(popt[1], 0.0)),
+        "tip_mu": tip_mu,
+        "tip_sigma_left": float(max(popt[3], 0.3)),
+        "tip_sigma_right": float(max(popt[4], 0.3)),
+        "cap_peak": float(max(popt[5], 0.0)),
+        "cap_mu": cap_mu,
+        "cap_sigma": float(max(popt[7], 0.3)),
+    }
+    return fitted, params, fit_ok
 
 
 def _segment_centerline_regions(intensities: np.ndarray) -> dict[str, Any]:
@@ -362,71 +462,70 @@ def _segment_centerline_regions(intensities: np.ndarray) -> dict[str, Any]:
             **{f"far_{k}": v for k, v in _empty_region_measurement().items()},
         }
 
-    peaks, _ = find_peaks(intensities)
+    fitted_profile, fitted_params, fit_ok = _fit_centerline_profile(intensities)
+    profile = fitted_profile if fit_ok else intensities
 
-    cap_present = False
-    cap_valley_idx: int | None = None
-    tip_peak_idx: int | None = None
+    profile_range = float(np.max(profile) - np.min(profile))
+    eps = max(profile_range * 1e-9, 1e-12)
 
-    peak_prominences_values: np.ndarray | None = None
+    tip_mu = float(
+        np.clip(fitted_params.get("tip_mu", float(np.argmax(profile))), 0, n - 1)
+    )
+    tip_peak = float(max(fitted_params.get("tip_peak", profile_range), 0.0))
+    tip_sigma_left = max(float(fitted_params.get("tip_sigma_left", 1.0)), 0.3)
+    tip_sigma_right = max(float(fitted_params.get("tip_sigma_right", 1.0)), 0.3)
+    tip_sigma_right_region = min(tip_sigma_right, tip_sigma_left)
 
-    if len(peaks) >= 2:
-        profile_range = float(np.max(intensities) - np.min(intensities))
-        eps = max(profile_range * 1e-9, 1e-12)
-        cap_min_drop = max(profile_range * 0.08, eps)
-        cap_min_prominence = max(profile_range * 0.05, eps)
-
-        peak_prominences_values = peak_prominences(intensities, peaks)[0]
-        rightmost_peak_idx = int(peaks[-1])
-        previous_peak_idx = int(peaks[-2])
-        valley_idx = _find_valley_index(
-            intensities, previous_peak_idx, rightmost_peak_idx
-        )
-
-        cap_drop = float(intensities[rightmost_peak_idx] - intensities[valley_idx])
-        cap_prominence = float(peak_prominences_values[-1])
-        separated = rightmost_peak_idx - previous_peak_idx >= 2
-
-        if (
-            separated
-            and cap_drop >= cap_min_drop
-            and cap_prominence >= cap_min_prominence
-        ):
-            cap_present = True
-            cap_valley_idx = valley_idx
-            left_peaks = peaks[peaks <= cap_valley_idx]
-            if len(left_peaks) > 0:
-                tip_peak_idx = int(left_peaks[-1])
-            else:
-                tip_peak_idx = previous_peak_idx
-
-    if tip_peak_idx is None:
-        if len(peaks) > 0:
-            if len(peaks) == 1:
-                tip_peak_idx = int(peaks[0])
-            else:
-                if peak_prominences_values is None:
-                    peak_prominences_values = peak_prominences(intensities, peaks)[0]
-                tip_peak_idx = int(peaks[int(np.argmax(peak_prominences_values))])
-        else:
-            tip_peak_idx = int(np.argmax(intensities))
-
-    if cap_present and cap_valley_idx is not None:
-        tip_right_idx = int(cap_valley_idx)
-    else:
-        tip_right_idx = _find_tip_right_boundary_without_cap(intensities, tip_peak_idx)
-
-    tip_right_idx = int(np.clip(tip_right_idx, 0, n - 1))
-    target_intensity = float(intensities[tip_right_idx])
-    tip_left_idx = _find_tip_left_boundary_at_target(
-        intensities, tip_peak_idx, target_intensity
+    tip_support_sigma = 1.5
+    tip_start_idx = int(
+        np.clip(np.floor(tip_mu - tip_support_sigma * tip_sigma_left), 0, n - 1)
+    )
+    tip_end_idx = int(
+        np.clip(np.ceil(tip_mu + tip_support_sigma * tip_sigma_right_region), 0, n - 1)
     )
 
-    tip_start_idx = int(min(tip_left_idx, tip_right_idx))
-    tip_end_idx = int(max(tip_left_idx, tip_right_idx))
+    cap_present = False
+    cap_start_idx: int | None = None
+    cap_end_idx: int | None = None
+
+    cap_peak = float(max(fitted_params.get("cap_peak", 0.0), 0.0))
+    cap_mu = float(np.clip(fitted_params.get("cap_mu", float(n - 1)), 0, n - 1))
+    cap_sigma = max(float(fitted_params.get("cap_sigma", 1.0)), 0.3)
+
+    edge_width = max(4, int(round(0.12 * n)))
+    edge_start = max(0, n - edge_width)
+    edge_values = profile[edge_start:]
+    edge_median = float(np.median(edge_values))
+    edge_mad = float(np.median(np.abs(edge_values - edge_median)))
+    edge_noise = max(1.4826 * edge_mad, eps)
+
+    cap_peak_min = max(profile_range * 0.10, 3.0 * edge_noise)
+    cap_is_near_edge = cap_mu >= edge_start
+    cap_is_separated = (cap_mu - 1.0 * cap_sigma) > (
+        tip_mu + 0.2 * tip_sigma_right_region
+    )
+    cap_is_large_vs_tip = cap_peak >= max(0.15 * tip_peak, eps)
+
+    cap_support_sigma = 2.0
+    if (
+        fit_ok
+        and cap_peak >= cap_peak_min
+        and cap_is_near_edge
+        and cap_is_separated
+        and cap_is_large_vs_tip
+    ):
+        cap_start_idx = int(
+            np.clip(np.floor(cap_mu - cap_support_sigma * cap_sigma), 0, n - 1)
+        )
+        cap_end_idx = int(n - 1)
+        if cap_start_idx <= cap_end_idx:
+            cap_present = True
+            tip_end_idx = min(tip_end_idx, cap_start_idx - 1)
+
     if tip_end_idx < tip_start_idx:
-        tip_start_idx = tip_peak_idx
-        tip_end_idx = tip_peak_idx
+        tip_center_idx = int(np.clip(round(tip_mu), 0, n - 1))
+        tip_start_idx = tip_center_idx
+        tip_end_idx = tip_center_idx
 
     tip_width = max(1, tip_end_idx - tip_start_idx + 1)
 
@@ -446,13 +545,6 @@ def _segment_centerline_regions(intensities: np.ndarray) -> dict[str, Any]:
     else:
         far_start_idx = max(0, far_start_idx)
 
-    if cap_present and cap_valley_idx is not None:
-        cap_start_idx = int(np.clip(cap_valley_idx, 0, n - 1))
-        cap_end_idx = int(n - 1)
-    else:
-        cap_start_idx = None
-        cap_end_idx = None
-
     cap_measurement = _measure_region(intensities, cap_start_idx, cap_end_idx)
     tip_measurement = _measure_region(intensities, tip_start_idx, tip_end_idx)
     middle_measurement = _measure_region(intensities, middle_start_idx, middle_end_idx)
@@ -460,6 +552,13 @@ def _segment_centerline_regions(intensities: np.ndarray) -> dict[str, Any]:
 
     return {
         "cap_present": bool(cap_present),
+        "_profile_fit_ok": bool(fit_ok),
+        "_profile_fit": fitted_profile,
+        "_profile_tip_mu": fitted_params.get("tip_mu", np.nan),
+        "_profile_tip_sigma_left": fitted_params.get("tip_sigma_left", np.nan),
+        "_profile_tip_sigma_right": fitted_params.get("tip_sigma_right", np.nan),
+        "_profile_cap_mu": fitted_params.get("cap_mu", np.nan),
+        "_profile_cap_sigma": fitted_params.get("cap_sigma", np.nan),
         **{f"cap_{k}": v for k, v in cap_measurement.items()},
         **{f"tip_{k}": v for k, v in tip_measurement.items()},
         **{f"middle_{k}": v for k, v in middle_measurement.items()},
@@ -488,6 +587,80 @@ def _smooth_skeleton_intensities(
         savgol_filter(intensities, window_length=window, polyorder=polyorder),
         dtype=np.float64,
     )
+
+
+def _gaussian_profile_model(
+    x: np.ndarray, peak: float, mu: float, sigma: float, offset: float
+) -> np.ndarray:
+    sigma_safe = max(float(sigma), 1e-6)
+    return offset + peak * np.exp(-((x - mu) ** 2) / (2.0 * sigma_safe**2))
+
+
+def _fit_gaussian_profile(
+    profile: np.ndarray,
+) -> tuple[float, float, float, float, bool]:
+    y = np.asarray(profile, dtype=np.float64)
+    x = np.arange(len(y), dtype=np.float64)
+
+    if len(y) == 0:
+        return 0.0, 0.0, 1.0, 0.0, False
+
+    offset0 = float(np.min(y))
+    peak0 = float(max(np.max(y) - offset0, 0.0))
+    mu0 = float(np.argmax(y))
+    sigma0 = max(float(len(y)) / 8.0, 1.0)
+
+    if len(y) < 4:
+        return peak0, mu0, sigma0, offset0, False
+
+    bounds = (
+        [0.0, 0.0, 0.5, -np.inf],
+        [np.inf, float(len(y) - 1), float(len(y)), np.inf],
+    )
+
+    try:
+        popt, _ = curve_fit(
+            _gaussian_profile_model,
+            x,
+            y,
+            p0=[peak0, mu0, sigma0, offset0],
+            bounds=bounds,
+            maxfev=3000,
+        )
+        peak = float(max(popt[0], 0.0))
+        mu = float(np.clip(popt[1], 0.0, len(y) - 1))
+        sigma = float(max(popt[2], 0.5))
+        offset = float(popt[3])
+        return peak, mu, sigma, offset, True
+    except Exception:
+        return peak0, mu0, sigma0, offset0, False
+
+
+def _compose_skeleton_measurement(
+    intensities: np.ndarray, coordinates: np.ndarray, length: int
+) -> SkeletonMeasurement:
+    intensities = np.asarray(intensities, dtype=np.float64)
+    coordinates = np.asarray(coordinates, dtype=np.float64)
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError(
+            f"Expected coordinates shape [_, 2], found {coordinates.shape}"
+        )
+
+    if len(intensities) == 0:
+        raise ValueError("No points in perpendicular profiles")
+
+    last_argmax = len(intensities) - np.argmax(intensities[::-1]) - 1
+    distance_to_max = np.linalg.norm(coordinates - coordinates[last_argmax, :], axis=1)
+    sel = np.abs(distance_to_max <= length)
+    region_measurements = _segment_centerline_regions(intensities)
+
+    return {
+        "intensities": intensities,
+        "intensity": float(np.sum(intensities[sel])),
+        "pixel_count": int(np.sum(sel)),
+        "_coordinates": np.rint(coordinates).astype(np.int64),
+        **region_measurements,
+    }
 
 
 def measure_skeleton(
@@ -519,35 +692,98 @@ def measure_skeleton(
     )
     assert len(results) > 0, "No points in perpendicular profiles"
 
-    coordinates = np.asarray(
-        [result["coordinates"] for result in results], dtype=np.int64
-    )
-
-    assert coordinates.ndim == 2, f"Expected 2d, found {coordinates.ndim}"
-    assert coordinates.shape[1] == 2, (
-        f"Expected shape [_, 2], found {coordinates.shape}"
-    )
-
     intensities = np.asarray(
         [np.sum(result["intensities"]) for result in results], dtype=np.float64
     )
     intensities = _smooth_skeleton_intensities(intensities, intensity_savgol_window)
+    coordinates = np.asarray(
+        [result["coordinates"] for result in results], dtype=np.float64
+    )
 
-    last_argmax = len(intensities) - np.argmax(intensities[::-1]) - 1
+    return _compose_skeleton_measurement(intensities, coordinates, length)
 
-    distance_to_max = np.linalg.norm(coordinates - coordinates[last_argmax, :], axis=1)
 
-    sel = np.abs(distance_to_max <= length)
+def measure_skeleton_gaussian(
+    im: IntensityImage,
+    skeleton: MaskImage,
+    perpendicular_width: int,
+    length: int,
+    intensity_savgol_window: int = 0,
+) -> SkeletonMeasurement:
+    assert np.sum(skeleton) > 0, "No points in the skeleton"
+    line_width = max(1, 5 * int(perpendicular_width))
+    results = skeleton_utils.get_ordered_perpendicular_profiles(
+        im, skeleton, line_width
+    )
+    assert len(results) > 0, "No points in perpendicular profiles"
 
-    region_measurements = _segment_centerline_regions(intensities)
+    peak_profile: list[float] = []
+    gauss_offset: list[float] = []
+    gauss_sigma: list[float] = []
+    gauss_mu_offset: list[float] = []
+    gauss_fit_ok: list[float] = []
+    peak_coordinates: list[np.ndarray] = []
+    peak_left_coordinates: list[np.ndarray] = []
+    peak_right_coordinates: list[np.ndarray] = []
 
-    return {
-        "intensities": intensities,
-        "intensity": float(np.sum(intensities[sel])),
-        "pixel_count": int(np.sum(sel)),
-        "_coordinates": coordinates,  # [sel, :],
-        **region_measurements,
-    }
+    for result in results:
+        profile = np.asarray(result["intensities"], dtype=np.float64)
+        peak, mu, sigma, offset, fit_ok = _fit_gaussian_profile(profile)
+
+        offsets = np.asarray(
+            result.get("offsets", np.arange(len(profile), dtype=np.float64)),
+            dtype=np.float64,
+        )
+        if len(offsets) == len(profile):
+            mu_offset = float(
+                np.interp(mu, np.arange(len(profile), dtype=np.float64), offsets)
+            )
+        else:
+            mu_offset = float(mu - (len(profile) - 1) / 2.0)
+
+        normal = np.asarray(result.get("normal", np.zeros(2, dtype=np.float64)))
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm > 0:
+            normal = normal / normal_norm
+        else:
+            normal = np.zeros(2, dtype=np.float64)
+
+        center = np.asarray(result["coordinates"], dtype=np.float64)
+        peak_coord = center + normal * mu_offset
+        peak_left_coord = peak_coord - normal * sigma
+        peak_right_coord = peak_coord + normal * sigma
+
+        peak_profile.append(float(peak))
+        gauss_offset.append(float(offset))
+        gauss_sigma.append(float(sigma))
+        gauss_mu_offset.append(float(mu_offset))
+        gauss_fit_ok.append(1.0 if fit_ok else 0.0)
+        peak_coordinates.append(peak_coord)
+        peak_left_coordinates.append(peak_left_coord)
+        peak_right_coordinates.append(peak_right_coord)
+
+    intensities = np.asarray(peak_profile, dtype=np.float64)
+    intensities = _smooth_skeleton_intensities(intensities, intensity_savgol_window)
+
+    measurement = _compose_skeleton_measurement(
+        intensities,
+        np.asarray(peak_coordinates, dtype=np.float64),
+        length,
+    )
+    measurement["_peak_coordinates"] = np.asarray(peak_coordinates, dtype=np.float64)
+    measurement["_peak_left_coordinates"] = np.asarray(
+        peak_left_coordinates, dtype=np.float64
+    )
+    measurement["_peak_right_coordinates"] = np.asarray(
+        peak_right_coordinates, dtype=np.float64
+    )
+    measurement["_gauss_peak"] = np.asarray(peak_profile, dtype=np.float64)
+    measurement["_gauss_offset"] = np.asarray(gauss_offset, dtype=np.float64)
+    measurement["_gauss_sigma"] = np.asarray(gauss_sigma, dtype=np.float64)
+    measurement["_gauss_mu_offset"] = np.asarray(gauss_mu_offset, dtype=np.float64)
+    measurement["_gauss_fit_ok"] = np.asarray(gauss_fit_ok, dtype=np.float64)
+
+    return measurement
 
 
 def _select_largest_root_mask(mask: MaskImage) -> MaskImage:
@@ -606,16 +842,27 @@ def _measure_image(
     if skeleton is None:
         raise ValueError("skeleton is required for centerline measurements")
 
+    if measurement_config.method == "centerline_gaussian":
+        skeleton_measurement = measure_skeleton_gaussian(
+            im,
+            np.logical_and(skeleton, root_mask),
+            measurement_config.perpendicular_width,
+            measurement_config.length,
+            measurement_config.intensity_savgol_window,
+        )
+    else:
+        skeleton_measurement = measure_skeleton(
+            im,
+            np.logical_and(skeleton, root_mask),
+            measurement_config.perpendicular_width,
+            measurement_config.length,
+            measurement_config.intensity_savgol_window,
+        )
+
     return {
         **prefix_keys(
             "skel_",
-            measure_skeleton(
-                im,
-                np.logical_and(skeleton, root_mask),
-                measurement_config.perpendicular_width,
-                measurement_config.length,
-                measurement_config.intensity_savgol_window,
-            ),
+            skeleton_measurement,
         ),
     }
 

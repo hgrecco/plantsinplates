@@ -75,10 +75,8 @@ def get_ordered_perpendicular_profiles(
 
         # Line coordinates along the perpendicular direction
         half_width = line_width // 2
-        line_coords = [
-            (row1 + normal[0] * d, col1 + normal[1] * d)
-            for d in range(-half_width, half_width + 1)
-        ]
+        offsets = np.arange(-half_width, half_width + 1, dtype=np.float64)
+        line_coords = [(row1 + normal[0] * d, col1 + normal[1] * d) for d in offsets]
         line_coords = np.array(line_coords).T  # shape (2, N)
 
         # Sample intensity using bilinear interpolation
@@ -87,6 +85,8 @@ def get_ordered_perpendicular_profiles(
             {
                 "coordinates": (row1, col1),
                 "intensities": intensities,
+                "normal": normal.astype(np.float64),
+                "offsets": offsets,
             }
         )
 

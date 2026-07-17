@@ -245,9 +245,9 @@ class AnalyzeApp(tk.Tk):
         self.method_combo = ttk.Combobox(
             config_frame,
             textvariable=self.method_var,
-            values=["box", "centerline"],
+            values=["box", "centerline", "centerline_gaussian"],
             state="readonly",
-            width=12,
+            width=20,
         )
         self.method_combo.grid(row=0, column=1, padx=5, pady=4, sticky=tk.W)
         self.method_combo.bind(

@@ -1,4 +1,4 @@
-from typing import Any, Literal, TypedDict, TypeGuard
+from typing import Any, Literal, NotRequired, TypedDict, TypeGuard
 
 import numpy as np
 
@@ -57,6 +57,8 @@ class RoiMeasurement(TypedDict):
 class PerpendicularProfile(TypedDict):
     coordinates: tuple[int, int]
     intensities: FloatVector
+    normal: NotRequired[FloatVector]
+    offsets: NotRequired[FloatVector]
 
 
 class SkeletonMeasurement(TypedDict):
@@ -64,6 +66,14 @@ class SkeletonMeasurement(TypedDict):
     intensity: float
     pixel_count: int
     _coordinates: IntCoodArray
+    _peak_coordinates: NotRequired[FloatCoodArray]
+    _peak_left_coordinates: NotRequired[FloatCoodArray]
+    _peak_right_coordinates: NotRequired[FloatCoodArray]
+    _gauss_peak: NotRequired[FloatVector]
+    _gauss_offset: NotRequired[FloatVector]
+    _gauss_sigma: NotRequired[FloatVector]
+    _gauss_mu_offset: NotRequired[FloatVector]
+    _gauss_fit_ok: NotRequired[FloatVector]
     cap_present: bool
     cap_start_idx: int
     cap_end_idx: int

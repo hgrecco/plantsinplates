@@ -51,6 +51,7 @@ CENTERLINE_REGION_STYLES: list[tuple[str, str]] = [
     ("tip", "#F58518"),
     ("cap", "#E45756"),
 ]
+CENTERLINE_METHODS = {"centerline", "centerline_gaussian"}
 
 FOOTNOTE_DATE: str = ""
 
@@ -303,6 +304,34 @@ def extract_centerline_coords(
     return np.column_stack((rows[order], cols[order]))
 
 
+def extract_record_coords(record: pd.Series, key: str) -> np.ndarray:
+    value = record.get(key, None)
+    if isinstance(value, np.ndarray):
+        coords = np.asarray(value, dtype=np.float64)
+    elif value is None:
+        return np.empty((0, 2), dtype=np.float64)
+    else:
+        try:
+            coords = np.asarray(value, dtype=np.float64)
+        except Exception:
+            return np.empty((0, 2), dtype=np.float64)
+
+    if coords.ndim != 2 or coords.shape[1] != 2:
+        return np.empty((0, 2), dtype=np.float64)
+    if len(coords) == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    return coords
+
+
+def clip_coords(coords: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    if len(coords) == 0:
+        return coords
+    clipped = np.asarray(coords, dtype=np.float64).copy()
+    clipped[:, 0] = np.clip(clipped[:, 0], 0, shape[0] - 1)
+    clipped[:, 1] = np.clip(clipped[:, 1], 0, shape[1] - 1)
+    return clipped
+
+
 def centerline_mask_style(df: pd.DataFrame) -> tuple[int, float]:
     config = df.attrs.get("measurement_config", {})
     perpendicular_width = int(config.get("perpendicular_width", 1))
@@ -385,6 +414,29 @@ def overlay_centerline_regions(
             va="top",
             weight="bold",
         )
+
+
+def extract_centerline_profile_fit(
+    record: pd.Series, profile_len: int
+) -> np.ndarray | None:
+    if profile_len <= 0:
+        return None
+
+    key = "skel__profile_fit"
+    if key not in record:
+        return None
+
+    fit_values = record[key]
+    if fit_values is None:
+        return None
+
+    fit = np.asarray(fit_values, dtype=np.float64)
+    if fit.ndim != 1 or len(fit) != profile_len:
+        return None
+    if not np.any(np.isfinite(fit)):
+        return None
+
+    return fit
 
 
 def relabel(s: str) -> str:
@@ -594,7 +646,7 @@ def generate_plateview(
     pdf_writer: PdfPages,
     plate_df: pd.DataFrame,
     *,
-    measurement_method: Literal["box", "centerline"] = "box",
+    measurement_method: Literal["box", "centerline", "centerline_gaussian"] = "box",
 ):
     """Generate a multi-page PDF with plate overview and summary plots.
 
@@ -782,7 +834,7 @@ def generate_dateview(
     pdf_writer: PdfPages,
     date_df: pd.DataFrame,
     *,
-    measurement_method: Literal["box", "centerline"] = "box",
+    measurement_method: Literal["box", "centerline", "centerline_gaussian"] = "box",
     centerline_dilation_radius: int = 0,
     centerline_alpha: float = 0.6,
 ):
@@ -864,7 +916,7 @@ def generate_dateview(
                 )
                 mask = np.zeros(im.shape, dtype=np.bool_)
 
-            if measurement_method == "centerline":
+            if measurement_method in CENTERLINE_METHODS:
                 try:
                     skeleton_mask = io.read(io.build_skeleton_path(record["path"]))
                 except FileNotFoundError as ex:
@@ -901,65 +953,130 @@ def generate_dateview(
                         facecolor="none",
                     )
                 )
-            elif measurement_method == "centerline":
+            elif measurement_method in CENTERLINE_METHODS:
                 centerline_coords = extract_centerline_coords(record, skeleton_mask)
                 if len(centerline_coords) > 0:
-                    coords = centerline_coords.astype(np.int64)
-                    rows = np.clip(coords[:, 0], 0, mask_layer.shape[0] - 1)
-                    cols = np.clip(coords[:, 1], 0, mask_layer.shape[1] - 1)
-                    line_coords = np.column_stack((rows, cols))
+                    line_coords = clip_coords(centerline_coords, mask_layer.shape)
 
-                    drawn = False
-                    for region_name, color in CENTERLINE_REGION_STYLES:
-                        if region_name == "cap" and not bool(
-                            record.get("skel_cap_present", False)
-                        ):
-                            continue
-
-                        bounds = extract_centerline_region_bounds(
-                            record, region_name, len(line_coords)
+                    if measurement_method == "centerline_gaussian":
+                        peak_coords = clip_coords(
+                            extract_record_coords(record, "skel__peak_coordinates"),
+                            mask_layer.shape,
                         )
-                        if bounds is None:
-                            continue
-
-                        start_idx, end_idx = bounds
-                        segment = line_coords[start_idx : end_idx + 1]
-                        if len(segment) == 0:
-                            continue
-
-                        ax_mask.plot(
-                            segment[:, 1],
-                            segment[:, 0],
-                            color="white",
-                            linewidth=2.0,
-                            alpha=0.75,
+                        left_coords = clip_coords(
+                            extract_record_coords(
+                                record, "skel__peak_left_coordinates"
+                            ),
+                            mask_layer.shape,
                         )
-                        ax_mask.plot(
-                            segment[:, 1],
-                            segment[:, 0],
-                            color=color,
-                            linewidth=1.2,
-                            alpha=1.0,
-                        )
-                        drawn = True
-
-                    if not drawn:
-                        ax_mask.plot(
-                            line_coords[:, 1],
-                            line_coords[:, 0],
-                            color="white",
-                            linewidth=2.0,
-                            alpha=0.75,
-                        )
-                        ax_mask.plot(
-                            line_coords[:, 1],
-                            line_coords[:, 0],
-                            color="#E45756",
-                            linewidth=1.2,
-                            alpha=1.0,
+                        right_coords = clip_coords(
+                            extract_record_coords(
+                                record, "skel__peak_right_coordinates"
+                            ),
+                            mask_layer.shape,
                         )
 
-    if measurement_method != "centerline" or "skel_intensities" not in date_df.columns:
+                        if len(peak_coords) > 0:
+                            ax_mask.plot(
+                                peak_coords[:, 1],
+                                peak_coords[:, 0],
+                                color="white",
+                                linewidth=1.0,
+                                alpha=0.8,
+                            )
+                            ax_mask.plot(
+                                peak_coords[:, 1],
+                                peak_coords[:, 0],
+                                color="#E45756",
+                                linewidth=0.6,
+                                alpha=1.0,
+                            )
+                            if len(left_coords) > 0:
+                                ax_mask.plot(
+                                    left_coords[:, 1],
+                                    left_coords[:, 0],
+                                    color="#4C78A8",
+                                    linewidth=0.55,
+                                    alpha=0.95,
+                                )
+                            if len(right_coords) > 0:
+                                ax_mask.plot(
+                                    right_coords[:, 1],
+                                    right_coords[:, 0],
+                                    color="#4C78A8",
+                                    linewidth=0.55,
+                                    alpha=0.95,
+                                )
+                        else:
+                            ax_mask.plot(
+                                line_coords[:, 1],
+                                line_coords[:, 0],
+                                color="white",
+                                linewidth=1.0,
+                                alpha=0.8,
+                            )
+                            ax_mask.plot(
+                                line_coords[:, 1],
+                                line_coords[:, 0],
+                                color="#E45756",
+                                linewidth=0.6,
+                                alpha=1.0,
+                            )
+                    else:
+                        drawn = False
+                        for region_name, color in CENTERLINE_REGION_STYLES:
+                            if region_name == "cap" and not bool(
+                                record.get("skel_cap_present", False)
+                            ):
+                                continue
+
+                            bounds = extract_centerline_region_bounds(
+                                record, region_name, len(line_coords)
+                            )
+                            if bounds is None:
+                                continue
+
+                            start_idx, end_idx = bounds
+                            segment = line_coords[start_idx : end_idx + 1]
+                            if len(segment) == 0:
+                                continue
+
+                            ax_mask.plot(
+                                segment[:, 1],
+                                segment[:, 0],
+                                color="white",
+                                linewidth=2.0,
+                                alpha=0.75,
+                            )
+                            ax_mask.plot(
+                                segment[:, 1],
+                                segment[:, 0],
+                                color=color,
+                                linewidth=1.2,
+                                alpha=1.0,
+                            )
+                            drawn = True
+
+                        if not drawn:
+                            ax_mask.plot(
+                                line_coords[:, 1],
+                                line_coords[:, 0],
+                                color="white",
+                                linewidth=2.0,
+                                alpha=0.75,
+                            )
+                            ax_mask.plot(
+                                line_coords[:, 1],
+                                line_coords[:, 0],
+                                color="#E45756",
+                                linewidth=1.2,
+                                alpha=1.0,
+                            )
+
+    if (
+        measurement_method not in CENTERLINE_METHODS
+        or "skel_intensities" not in date_df.columns
+    ):
         return
 
     with pdf_figure(
@@ -1011,6 +1128,15 @@ def generate_dateview(
 
             profile = np.asarray(record["skel_intensities"], dtype=np.float64)
             ax.plot(profile, color="black", linewidth=0.8)
+            profile_fit = extract_centerline_profile_fit(record, len(profile))
+            if profile_fit is not None:
+                ax.plot(
+                    profile_fit,
+                    color="#1F77B4",
+                    linewidth=0.8,
+                    linestyle="--",
+                    alpha=0.9,
+                )
             overlay_centerline_regions(ax, record, profile)
 
             # Keep bottom row empty for the method-specific page layout.
