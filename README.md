@@ -3,7 +3,7 @@
 Turn organized fluorescence microscopy images into a clear view of root signal
 and growth over time.
 
-![Plants in Plates icon](https://github.com/plantsinplates/assets/plantinplates_icon_128.png)
+![Plants in Plates icon](https://raw.githubusercontent.com/hgrecco/plantsinplates/main/plantsinplates/assets/plantinplates_icon_128.png)
 
 Plants in Plates helps plant researchers analyze individual-root fluorescence
 images across plates and dates, then share the result as Excel tables and PDF
