@@ -299,6 +299,16 @@ class AnalyzeApp(ttk.Window):
             font=self.helper_font,
         )
         self.style.configure(
+            "SummaryLabel.TLabel",
+            foreground=helper_color,
+            font=self.helper_font,
+        )
+        self.style.configure(
+            "SummaryValue.TLabel",
+            foreground=colors.dark,
+            font=self.control_title_font,
+        )
+        self.style.configure(
             "Section.TFrame",
             background=colors.bg,
             bordercolor=surface_border,
@@ -525,6 +535,33 @@ class AnalyzeApp(ttk.Window):
         if not hasattr(self, "step_pages") or not hasattr(self, "cancel_button"):
             return
 
+        if hasattr(self, "summary_folder_name_var"):
+            if self.selected_folder is not None:
+                self.summary_folder_name_var.set(self.selected_folder.name)
+                self.summary_folder_path_var.set(str(self.selected_folder))
+            else:
+                self.summary_folder_name_var.set("No folder selected")
+                self.summary_folder_path_var.set("Choose input data")
+
+            calibration_mode = self.calibration_mode_var.get()
+            if calibration_mode == "metadata":
+                calibration_name = "Image metadata"
+                calibration_detail = "Per-image embedded X/Y pixel size"
+            elif calibration_mode == "cal_file":
+                calibration_name = "cal.txt"
+                calibration_detail = (
+                    str(self.calibration_file_path)
+                    if self.calibration_file_path is not None
+                    else "Shared calibration file unavailable"
+                )
+            else:
+                calibration_name = "Manual value"
+                calibration_detail = (
+                    f"{self.manual_calibration_var.get()} µm per pixel, shared"
+                )
+            self.summary_calibration_name_var.set(calibration_name)
+            self.summary_calibration_detail_var.set(calibration_detail)
+
         folder_subtitle = (
             self.selected_folder.name
             if self.selected_folder is not None and self.folder_validation.valid
@@ -718,11 +755,6 @@ class AnalyzeApp(ttk.Window):
             text="Choose data, make calibration explicit, and keep every run reproducible.",
             style="AppSubtitle.TLabel",
         ).pack(anchor=tk.W, pady=(SPACE_XS, 0))
-        ttk.Separator(self.content).pack(
-            fill=tk.X,
-            padx=SPACE_LG,
-            pady=(0, SPACE_MD),
-        )
         self.step_pages = {
             step.key: self._create_step_page(step) for step in WORKFLOW_STEPS
         }
@@ -736,6 +768,8 @@ class AnalyzeApp(ttk.Window):
 
     def _create_step_page(self, step: StepDefinition) -> ttk.Frame:
         page = ttk.Frame(self.content, style="App.TFrame")
+        if step.key == "method":
+            self._create_context_summary(page)
         ttk.Label(
             page,
             text={
@@ -747,18 +781,59 @@ class AnalyzeApp(ttk.Window):
             }[step.key],
             style="StepTitle.TLabel",
         ).pack(anchor=tk.W, padx=SPACE_LG)
-        ttk.Label(
-            page,
-            text={
-                "folder": "Choose the input data and review earlier managed runs.",
-                "calibration": "Select one explicit calibration source for this run.",
-                "method": "Choose a measurement approach and configure its physical dimensions.",
-                "analysis": "Review reuse behavior, then execute the configured analysis.",
-                "results": "Open the immutable run folder and generated reports.",
-            }[step.key],
-            style="StepSubtitle.TLabel",
-        ).pack(anchor=tk.W, padx=SPACE_LG, pady=(SPACE_XS, SPACE_MD))
+        ttk.Frame(page, height=SPACE_MD, style="App.TFrame").pack()
         return page
+
+    def _create_context_summary(self, parent: ttk.Frame) -> None:
+        summary = self.card(parent)
+        summary.columnconfigure(0, weight=1)
+        summary.columnconfigure(1, weight=1)
+
+        self.summary_folder_name_var = tk.StringVar(value="No folder selected")
+        self.summary_folder_path_var = tk.StringVar(value="Choose input data")
+        self.summary_calibration_name_var = tk.StringVar(value="Not configured")
+        self.summary_calibration_detail_var = tk.StringVar(
+            value="Choose a calibration source"
+        )
+
+        folder = ttk.Frame(summary)
+        folder.grid(row=0, column=0, sticky=tk.EW, padx=(0, SPACE_LG))
+        ttk.Label(folder, text="Folder", style="SummaryLabel.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            folder,
+            textvariable=self.summary_folder_name_var,
+            style="SummaryValue.TLabel",
+        ).pack(anchor=tk.W, pady=(SPACE_XS, 0))
+        ttk.Label(
+            folder,
+            textvariable=self.summary_folder_path_var,
+            style="Helper.TLabel",
+            wraplength=360,
+        ).pack(anchor=tk.W, pady=(SPACE_XS, 0))
+
+        calibration = ttk.Frame(summary)
+        calibration.grid(row=0, column=1, sticky=tk.EW, padx=(0, SPACE_LG))
+        ttk.Label(calibration, text="Calibration", style="SummaryLabel.TLabel").pack(
+            anchor=tk.W
+        )
+        ttk.Label(
+            calibration,
+            textvariable=self.summary_calibration_name_var,
+            style="SummaryValue.TLabel",
+        ).pack(anchor=tk.W, pady=(SPACE_XS, 0))
+        ttk.Label(
+            calibration,
+            textvariable=self.summary_calibration_detail_var,
+            style="Helper.TLabel",
+            wraplength=300,
+        ).pack(anchor=tk.W, pady=(SPACE_XS, 0))
+
+        ttk.Button(
+            summary,
+            text="Edit",
+            command=lambda: self.show_step("folder"),
+            bootstyle="primary-outline",
+        ).grid(row=0, column=2, sticky=tk.E)
 
     def _create_input_card(self) -> None:
         frame = self.card(self.step_pages["folder"])

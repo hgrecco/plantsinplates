@@ -50,9 +50,6 @@ pixi install
 pixi run gui-dev /absolute/path/to/experiment_014
 ```
 
-The desktop uses the cross-platform `ttkbootstrap` Litera theme, which is
-installed automatically with the locked Pixi environment.
-
 Prefer a non-interactive run? Analyze a whole experiment or one plate directly:
 
 ```console
@@ -64,18 +61,12 @@ automated test suite.
 
 ## Go deeper
 
-- [Deep-dive guide](docs/guide.md): installation, input workbook and folder
+- [Deep-dive guide](https://github.com/hgrecco/plantsinplates/blob/main/docs/guide.md): installation, input workbook and folder
   contract, calibration, measurement options, outputs, caches, all Pixi tasks,
   troubleshooting, and contributing.
-- [Mathematical summary](docs/math.md): measurement models and derived
-  quantities.
-- [Data organization](docs/data_organization.md): canonical folder, workbook,
-  image-path, calibration-file, output, and cache layout.
+- [Mathematical summary](https://github.com/hgrecco/plantsinplates/blob/main/docs/math.md): measurement models and derived quantities.
+- [Data organization](https://github.com/hgrecco/plantsinplates/blob/main/docs/data_organization.md): canonical folder, workbook, image-path, calibration-file, output, and cache layout.
 
-## Project status and license
-
-The repository includes a working application, but no formal stability, support,
-contribution, or release policy. Its runtime reports version `2026.07.17`;
-Pixi's project metadata lists `0.1.0`.
+## License
 
 Plants in Plates is available under the [MIT License](LICENSE).

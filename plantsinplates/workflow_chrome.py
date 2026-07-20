@@ -287,10 +287,10 @@ class _StepIndicator(tk.Canvas):
             text = None
             text_color = dark
         else:
-            fill = background
-            outline = border
+            fill = secondary
+            outline = secondary
             text = str(number)
-            text_color = secondary
+            text_color = selectfg
 
         self.create_oval(
             self.CENTER_X - self.RADIUS,
@@ -451,7 +451,7 @@ class _WorkflowStepRow(ttk.Frame):
 
         self._text_container = ttk.Frame(
             self,
-            style="Workflow.Step.TFrame",
+            style="Workflow.StepContent.TFrame",
         )
         self._text_container.grid(
             row=0,
@@ -546,27 +546,31 @@ class _WorkflowStepRow(ttk.Frame):
 
         if state is StepState.CURRENT:
             row_style = "Workflow.ActiveStep.TFrame"
+            content_style = "Workflow.ActiveStepContent.TFrame"
             title_style = "Workflow.ActiveTitle.TLabel"
             subtitle_style = "Workflow.ActiveSubtitle.TLabel"
             background = self._active_background
         elif state is StepState.UPCOMING:
             row_style = "Workflow.Step.TFrame"
+            content_style = "Workflow.StepContent.TFrame"
             title_style = "Workflow.MutedTitle.TLabel"
             subtitle_style = "Workflow.MutedSubtitle.TLabel"
             background = self._sidebar_background
         elif state is StepState.ERROR:
             row_style = "Workflow.Step.TFrame"
+            content_style = "Workflow.StepContent.TFrame"
             title_style = "Workflow.Title.TLabel"
             subtitle_style = "Workflow.Subtitle.TLabel"
             background = self._sidebar_background
         else:
             row_style = "Workflow.Step.TFrame"
+            content_style = "Workflow.StepContent.TFrame"
             title_style = "Workflow.Title.TLabel"
             subtitle_style = "Workflow.Subtitle.TLabel"
             background = self._sidebar_background
 
         self.configure(style=row_style)
-        self._text_container.configure(style=row_style)
+        self._text_container.configure(style=content_style)
         self._title_label.configure(style=title_style)
         self._subtitle_label.configure(style=subtitle_style)
 
@@ -630,10 +634,17 @@ class WorkflowSidebar(ttk.Frame):
             sidebar_background,
             0.08,
         )
+        active_border = _blend_color(
+            parent,
+            _theme_color(colors, "primary", "#0d6efd"),
+            sidebar_background,
+            0.22,
+        )
 
         self._configure_styles(
             sidebar_background=sidebar_background,
             active_background=active_background,
+            active_border=active_border,
         )
 
         super().__init__(
@@ -769,6 +780,7 @@ class WorkflowSidebar(ttk.Frame):
         *,
         sidebar_background: str,
         active_background: str,
+        active_border: str,
     ) -> None:
         style = ttk.Style()
         colors = style.colors
@@ -793,9 +805,23 @@ class WorkflowSidebar(ttk.Frame):
         style.configure(
             "Workflow.Step.TFrame",
             background=sidebar_background,
+            bordercolor=sidebar_background,
+            borderwidth=1,
+            relief="solid",
         )
         style.configure(
             "Workflow.ActiveStep.TFrame",
+            background=active_background,
+            bordercolor=active_border,
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure(
+            "Workflow.StepContent.TFrame",
+            background=sidebar_background,
+        )
+        style.configure(
+            "Workflow.ActiveStepContent.TFrame",
             background=active_background,
         )
         style.configure(

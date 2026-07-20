@@ -1,7 +1,5 @@
 # Data organization
 
-[← Return to the project overview](../README.md)
-
 This is the canonical reference for arranging Plants in Plates input data and
 understanding where managed outputs are written. The application can analyze a
 whole experiment or one plate, but the selected folder and everything below it

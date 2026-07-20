@@ -1,11 +1,8 @@
 # Plants in Plates deep-dive guide
 
-[← Return to the project overview](../README.md)
-
 This is the operational reference for Plants in Plates. It covers installation,
 input data, measurement settings, generated artifacts, development tasks, and
-troubleshooting. For a concise, outcome-focused overview, start with the
-[project README](../README.md).
+troubleshooting.
 
 ## Capabilities
 
@@ -34,13 +31,6 @@ Root length is **not** measured from the microscopy image by this code. The
 
 For the mathematical description of the implemented measurement models and
 derived time-series values, see [math.md](math.md).
-
-## Status
-
-No formal stability, support, or release policy is included in this repository.
-The runtime reports version `2026.07.17` with `pixi run show-version`,
-while the Pixi project metadata is `0.1.0`; the repository does not explain this
-version difference.
 
 ## Requirements
 
@@ -284,13 +274,6 @@ The GUI accepts visible size settings in micrometers and converts them with the
 explicit metadata, `cal.txt`, or manual calibration source. The batch command
 accepts the same settings in pixels. Do not copy a GUI value into the batch
 command without performing that conversion.
-
-## Contributing
-
-No contribution guide, code-of-conduct file, or canonical issue/merge-request
-location is included. If you are working with the repository maintainers, keep
-changes focused, run the available lint command, and validate analysis on a
-representative data directory before proposing a change.
 
 ## License
 
