@@ -309,17 +309,44 @@ class UpdateTests(unittest.TestCase):
             reopen.assert_not_called()
 
     def test_subprocess_output_keeps_pixi_diagnostics_out_of_the_version(self) -> None:
-        output = updates._run_logged(
-            self.install,
-            [
-                sys.executable,
-                "-c",
-                "import sys; print('2026.11.20'); print('Pixi diagnostics', file=sys.stderr)",
-            ],
-        )
+        with mock.patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252"}):
+            output = updates._run_logged(
+                self.install,
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('2026.11.20'); "
+                    "print('Pixi diagnostics\\u2026 \\u03b1', file=sys.stderr)",
+                ],
+            )
         self.assertEqual(output.strip(), "2026.11.20")
         log = self.install / updates.UPDATE_DIRECTORY / "update.log"
-        self.assertIn("Pixi diagnostics", log.read_text(encoding="utf-8"))
+        self.assertIn("Pixi diagnostics… α", log.read_text(encoding="utf-8"))
+
+    def test_non_utf8_subprocess_output_preserves_command_result(self) -> None:
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode):
+                command = [
+                    sys.executable,
+                    "-c",
+                    "import sys; "
+                    "sys.stdout.buffer.write(b'output\\x85\\n'); "
+                    "sys.stderr.buffer.write(b'diagnostics\\x85\\n'); "
+                    f"sys.exit({returncode})",
+                ]
+                if returncode:
+                    with self.assertRaisesRegex(
+                        updates.UpdateError, "Pixi could not complete the update"
+                    ):
+                        updates._run_logged(self.install, command)
+                else:
+                    self.assertEqual(
+                        updates._run_logged(self.install, command), "output\ufffd\n"
+                    )
+                log = self.install / updates.UPDATE_DIRECTORY / "update.log"
+                text = log.read_text(encoding="utf-8")
+                self.assertIn("output\ufffd\n", text)
+                self.assertIn("diagnostics\ufffd\n", text)
 
     def test_helper_environment_preserves_shell_paths_without_active_python(
         self,
@@ -331,6 +358,7 @@ class UpdateTests(unittest.TestCase):
             "CONDA_PREFIX": str(active),
             "PIXI_ENVIRONMENT_NAME": "default",
             "PYTHONPATH": "unrelated source",
+            "PYTHONIOENCODING": "cp1252",
         }
         with (
             mock.patch.dict(os.environ, environment, clear=True),
@@ -348,6 +376,7 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn("CONDA_PREFIX", result)
         self.assertNotIn("PIXI_ENVIRONMENT_NAME", result)
         self.assertNotIn("PYTHONPATH", result)
+        self.assertEqual(result["PYTHONIOENCODING"], "utf-8")
 
 
 if __name__ == "__main__":

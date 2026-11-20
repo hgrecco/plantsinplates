@@ -419,6 +419,8 @@ def _subprocess_environment(root: Path) -> dict[str, str]:
             paths.append(entry)
     paths.extend(os.defpath.split(os.pathsep))
     environment["PATH"] = os.pathsep.join(dict.fromkeys(paths))
+    # Redirected Python streams otherwise use the Windows code page.
+    environment["PYTHONIOENCODING"] = "utf-8"
     return environment
 
 
@@ -431,8 +433,12 @@ def _run_logged(
         log.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} {command!r}\n")
         log.flush()
         with (
-            tempfile.TemporaryFile(mode="w+", encoding="utf-8") as output,
-            tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errors,
+            tempfile.TemporaryFile(
+                mode="w+", encoding="utf-8", errors="replace"
+            ) as output,
+            tempfile.TemporaryFile(
+                mode="w+", encoding="utf-8", errors="replace"
+            ) as errors,
         ):
             process = subprocess.Popen(
                 command,

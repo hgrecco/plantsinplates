@@ -81,6 +81,7 @@ class PixiUpdateIntegrationTests(unittest.TestCase):
                     str(marker),
                 ],
                 cwd=installation,
+                env={**os.environ, "PYTHONIOENCODING": "cp1252"},
                 check=True,
                 capture_output=True,
                 text=True,
@@ -93,7 +94,8 @@ class PixiUpdateIntegrationTests(unittest.TestCase):
                     result = json.loads(result_path.read_text(encoding="utf-8"))
                     logs = installation / updates.UPDATE_DIRECTORY
                     details = "\n".join(
-                        path.read_text(encoding="utf-8") for path in logs.glob("*.log")
+                        path.read_text(encoding="utf-8", errors="replace")
+                        for path in logs.glob("*.log")
                     )
                     self.assertTrue(
                         result["success"], result["message"] + "\n" + details
@@ -102,7 +104,9 @@ class PixiUpdateIntegrationTests(unittest.TestCase):
             log = installation / updates.UPDATE_DIRECTORY / "helper.log"
             self.assertTrue(
                 marker.exists(),
-                log.read_text(encoding="utf-8") if log.exists() else "No helper log",
+                log.read_text(encoding="utf-8", errors="replace")
+                if log.exists()
+                else "No helper log",
             )
             self.assertEqual(marker.read_text(encoding="utf-8"), "2026.11.20")
             self.assertEqual(updates.installed_version(installation), "2026.11.20")
