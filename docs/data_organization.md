@@ -99,6 +99,41 @@ Example:
 | 1 | 1 | control | 12.4 | `row_001/fluo_1_1.czi` | 15.8 | `row_001/fluo_1_1.czi` |
 | 1 | 2 | treatment | 11.7 | `row_001/fluo_1_2.czi` | 14.1 | `row_001/fluo_1_2.czi` |
 
+### Generating a workbook template
+
+In the GUI's **Data folder** stage, select a plate or experiment and choose
+**Build info templates…**. A valid `info.xlsx` is not required. The scan creates
+`info_template.xlsx` inside each usable plate, with the required identifier
+columns and paired length/image columns for every discovered date key.
+
+- Names such as `fluo_1_2.czi` identify row 1, column 2. Zero padding and case
+  differences are accepted, so `FLUO_001_02.CZI` identifies the same position.
+  The same position is combined across dates.
+- Other filenames are included on separate rows, one per image, with blank
+  `row` and `col`. Identical unknown filenames on different dates are not
+  automatically combined.
+- Multiple images for one inferred position on the same date are all retained
+  on separate rows with blank positions. Template details identify the conflict
+  for manual review.
+- `genotype` and every `_length` cell remain blank. Length must come from your
+  external measurements. Dates without an image for a plant have blank cells.
+- The scan includes all recognized image extensions and nested date/image
+  directories. Overview images, hidden image files, managed run directories,
+  and reusable caches are excluded.
+- Plates with duplicate date keys, no usable date folders, or no root images
+  are skipped with an explanation. Other plates in an experiment still get
+  templates.
+
+The first worksheet has a frozen header and filters. Review plant matching,
+combine or remove rows as appropriate, and fill missing positions, genotype,
+and root lengths. Save the completed workbook as `info.xlsx` in its plate
+folder, then select **Re-check**. The analyzer does not read `info_template.xlsx`.
+
+Existing `info.xlsx` files are never changed by this action. If a template
+already exists, the GUI lists the templates to replace and asks for confirmation.
+Declining leaves every file unchanged. A write failure preserves an existing
+template; details report any plate that could not be saved.
+
 ## Image paths and files
 
 Values in `_fluo` columns are relative to the corresponding date directory.

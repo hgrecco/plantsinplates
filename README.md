@@ -43,21 +43,35 @@ It does not calculate root length from those images: length is supplied in
 
 ## Start here
 
-Install the locked Pixi environment, then open the source version of the GUI:
+For an installation that can update itself, install [Pixi](https://pixi.sh/)
+0.82.1 or later, download `plantsinplates-<version>.zip` from
+[GitHub Releases](https://github.com/hgrecco/plantsinplates/releases), and extract
+the complete ZIP into its own writable folder. From that folder, run:
 
 ```console
-pixi install
+pixi run --locked gui
+```
+
+Use **Preferences → Check for updates → Update and restart**, or run
+`pixi run --locked update-app`. Releases use date versions such as `2026.11.20`.
+Existing installations using the university update server need this one-time
+installation of a GitHub release.
+
+For development, clone the repository and open the source version of the GUI:
+
+```console
+pixi install --locked
 pixi run gui-dev /absolute/path/to/experiment_014
 ```
 
 Prefer a non-interactive run? Analyze a whole experiment or one plate directly:
 
 ```console
-pixi run test /absolute/path/to/experiment_014
+pixi run --locked batch /absolute/path/to/experiment_014
 ```
 
-Despite its current name, `test` is the batch analysis command, not an
-automated test suite.
+For a source checkout, use `pixi run test <data-dir>` instead. Despite its name,
+`test` is the source batch analysis command, not an automated test suite.
 
 ## Go deeper
 

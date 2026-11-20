@@ -3,25 +3,18 @@ authors = ["Hernan Grecco <hgrecco@gmail.com>"]
 channels = ["https://prefix.dev/conda-forge", "conda-forge"]
 name = "Plants in Plates"
 platforms = ["osx-arm64", "linux-64", "win-64"]
-version = "0.1.0"
+version = "2026.11.19"
+requires-pixi = ">=0.82.1"
 
 [tasks]
 show-version = "python plantsinplates-app version"
 gui = "python plantsinplates-app gui"
 gui-dev = "python __main__.py gui"
 test = "python __main__.py test"
+batch = "python plantsinplates-app test"
 
-build = "python -m zipfile -c plantsinplates-app __main__.py pixi.toml pixi.lock plantsinplates"
-upload = "scp plantsinplates-app df:/home/hgrecco/html/pkg"
-publish = [{ task = "build" }, { task = "upload" }]
-
-update = "python plantsinplates-app update;mv .tmp.new_version plantsinplates-app"
-update-app = [
-  { task = "show-version" },
-  { task = "update" },
-  { task = "show-version" },
-]
-
+build = "python scripts/build_release.py"
+publish = "python scripts/publish_release.py"
 
 [dependencies]
 python = "==3.12"
@@ -47,6 +40,14 @@ scipy-stubs = "*"
 
 [environments]
 lint = { features = ["lint"], no-default-feature = true }
+updater = { features = ["updater"], no-default-feature = true }
+
+[feature.updater.dependencies]
+python = "==3.12"
+
+[feature.updater.tasks]
+update = "python plantsinplates-updater.py"
+update-app = "python plantsinplates-updater.py"
 
 [feature.lint.dependencies]
 python = "==3.12"

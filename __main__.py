@@ -16,8 +16,9 @@ import warnings
 import ttkbootstrap as ttk
 import typer
 
-from plantsinplates import analyze, io as pipio, workflow
+from plantsinplates import analyze, io as pipio, updates, workflow
 from plantsinplates.measurement_config import MeasurementConfig
+from plantsinplates.update_dialog import UpdateDialog, show_update_result
 from plantsinplates.workflow_chrome import (
     ApplicationFooter,
     StatusKind,
@@ -118,6 +119,11 @@ def validation_display_text(validation: FolderValidation) -> str:
     return validation.message + " (hover for more information)"
 
 
+def can_build_info_templates(path: pathlib.Path | None, *, busy: bool = False) -> bool:
+    """Template creation needs a folder, even when its workbook is missing."""
+    return bool(not busy and path and path.is_dir() and workflow.folder_kind(path))
+
+
 class RelativeTimeFormatter(logging.Formatter):
     started = 0.0
 
@@ -193,6 +199,7 @@ class AnalyzeApp(ttk.Window):
     """Five-stage desktop workflow for reproducible analysis runs."""
 
     is_busy: bool = False
+    templates_in_progress: bool = False
 
     def __init__(
         self,
@@ -215,7 +222,12 @@ class AnalyzeApp(ttk.Window):
         self.selected_folder: pathlib.Path | None = None
         self.folder_validation = workflow.validate_folder(None)
         self.validation_generation = 0
+        self.folder_check_in_progress = False
         self.path_validation_after: str | None = None
+        self.template_generation = 0
+        self.template_cancel_event = threading.Event()
+        self.template_feedback_folder: pathlib.Path | None = None
+        self.closing = False
         self.previous_runs: list[workflow.RunRecord] = []
         self.selected_run: workflow.RunRecord | None = None
         self.audit_readings: list[workflow.CalibrationReading] = []
@@ -241,6 +253,7 @@ class AnalyzeApp(ttk.Window):
             self.after(0, self.recheck_folder)
         else:
             self._apply_folder_validation(None, workflow.validate_folder(None))
+        self.after(0, show_update_result, self)
 
     def _configure_styles(self) -> None:
         colors = self.style.colors
@@ -446,10 +459,27 @@ class AnalyzeApp(ttk.Window):
             self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def show_preferences(self) -> None:
-        messagebox.showinfo(
-            "Preferences",
-            "Analysis preferences are configured explicitly within each workflow step.",
-            parent=self,
+        dialog = getattr(self, "update_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
+        self.update_dialog = UpdateDialog(
+            self,
+            can_install=self.can_install_update,
+            on_restart=self.on_close,
+            data_folder=str(self.selected_folder or self.data_dir or ""),
+        )
+
+    def can_install_update(self) -> bool:
+        return not any(
+            getattr(self, name, False)
+            for name in (
+                "is_busy",
+                "templates_in_progress",
+                "folder_check_in_progress",
+                "audit_in_progress",
+                "closing",
+            )
         )
 
     def show_help(self) -> None:
@@ -457,7 +487,11 @@ class AnalyzeApp(ttk.Window):
 
     def show_step(self, key: str) -> None:
         index = WORKFLOW_INDEX[key]
-        if self.is_busy or index > self.furthest_step_index:
+        if (
+            self.is_busy
+            or self.templates_in_progress
+            or index > self.furthest_step_index
+        ):
             return
         self.current_step_index = index
         for step_key, page in self.step_pages.items():
@@ -469,11 +503,15 @@ class AnalyzeApp(ttk.Window):
         self.refresh_workflow_chrome()
 
     def go_back(self) -> None:
-        if not self.is_busy and self.current_step_index > 0:
+        if (
+            not self.is_busy
+            and not self.templates_in_progress
+            and self.current_step_index > 0
+        ):
             self.show_step(WORKFLOW_STEPS[self.current_step_index - 1].key)
 
     def go_forward(self) -> None:
-        if self.is_busy:
+        if self.is_busy or self.templates_in_progress:
             return
         if self.current_step_index == WORKFLOW_INDEX["analysis"]:
             self.analyze_selected_folder()
@@ -614,8 +652,14 @@ class AnalyzeApp(ttk.Window):
             self.sidebar.set_state(step.key, state)
 
         self.footer.configure_back(
-            enabled=self.current_step_index > 0 and not self.is_busy
+            enabled=self.current_step_index > 0
+            and not self.is_busy
+            and not self.templates_in_progress
         )
+        if self.templates_in_progress:
+            self.footer.configure_continue(enabled=False, text="Building templates…")
+            self.footer.set_status(self.template_status_var.get(), StatusKind.BUSY)
+            return
         if self.is_busy:
             self.footer.configure_continue(
                 enabled=False,
@@ -905,19 +949,62 @@ class AnalyzeApp(ttk.Window):
             justify=tk.LEFT,
         )
 
+        templates = ttk.Frame(frame)
+        templates.grid(row=5, column=0, columnspan=4, sticky=tk.EW, pady=(SPACE_MD, 0))
+        templates.columnconfigure(0, weight=1)
+        template_actions = ttk.Frame(templates)
+        template_actions.grid(row=0, column=0, sticky=tk.W)
+        self.template_button = ttk.Button(
+            template_actions,
+            text="Build info templates…",
+            command=self.build_info_templates,
+            bootstyle="primary-outline",
+        )
+        self.template_button.pack(side=tk.LEFT, padx=(0, SPACE_SM))
+        self.template_details_visible = False
+        self.template_details_var = tk.StringVar()
+        self.template_details_button = ttk.Button(
+            template_actions,
+            text="Show template details",
+            command=self.toggle_template_details,
+            bootstyle="link",
+            state="disabled",
+        )
+        self.template_details_button.pack(side=tk.LEFT)
+        self.template_status_var = tk.StringVar(
+            value="Scan images to create info_template.xlsx. Review and fill the template before analysis."
+        )
+        self.template_status_label = self.card_label(
+            templates,
+            textvariable=self.template_status_var,
+            muted=True,
+            wraplength=650,
+            justify=tk.LEFT,
+        )
+        self.template_status_label.grid(
+            row=1, column=0, sticky=tk.EW, pady=(SPACE_XS, 0)
+        )
+        self.template_details_label = self.card_label(
+            templates,
+            textvariable=self.template_details_var,
+            muted=True,
+            wraplength=650,
+            justify=tk.LEFT,
+        )
+
         ttk.Separator(frame).grid(
-            row=5,
+            row=6,
             column=0,
             columnspan=4,
             sticky=tk.EW,
             pady=SPACE_MD,
         )
         self.card_label(frame, "Previous runs", style="SectionTitle.TLabel").grid(
-            row=6, column=0, sticky=tk.W
+            row=7, column=0, sticky=tk.W
         )
         self.runs_status_var = tk.StringVar(value="No managed runs found.")
         self.card_label(frame, textvariable=self.runs_status_var, muted=True).grid(
-            row=6, column=1, columnspan=3, sticky=tk.E
+            row=7, column=1, columnspan=3, sticky=tk.E
         )
         columns = ("time", "status", "method", "calibration", "reuse", "outputs")
         self.runs_tree = ttk.Treeview(
@@ -949,7 +1036,7 @@ class AnalyzeApp(ttk.Window):
                 column, width=widths[column], minwidth=60, stretch=column == "time"
             )
         self.runs_tree.grid(
-            row=7,
+            row=8,
             column=0,
             columnspan=4,
             sticky=tk.EW,
@@ -966,14 +1053,14 @@ class AnalyzeApp(ttk.Window):
             wraplength=900,
             justify=tk.LEFT,
         ).grid(
-            row=8,
+            row=9,
             column=0,
             columnspan=4,
             sticky=tk.W,
             pady=(SPACE_XS, SPACE_SM),
         )
         run_actions = ttk.Frame(frame)
-        run_actions.grid(row=9, column=0, columnspan=4, sticky=tk.W)
+        run_actions.grid(row=10, column=0, columnspan=4, sticky=tk.W)
         self.open_previous_run_button = ttk.Button(
             run_actions,
             text="Open run folder",
@@ -1354,6 +1441,12 @@ class AnalyzeApp(ttk.Window):
         pipio.logger.setLevel(logging.INFO)
 
     def on_close(self) -> None:
+        self.closing = True
+        dialog = getattr(self, "update_dialog", None)
+        if dialog is not None:
+            dialog.cancel_before_close()
+        self.template_cancel_event.set()
+        self.template_generation += 1
         if self.is_busy:
             self.run_cancel_event.set()
         self.audit_cancel_event.set()
@@ -1384,13 +1477,15 @@ class AnalyzeApp(ttk.Window):
         self.log_text.configure(state="disabled")
 
     def schedule_path_validation(self, delay_ms: int = 600) -> None:
-        if self.is_busy:
+        if self.is_busy or self.templates_in_progress:
             return
         if self.path_validation_after is not None:
             self.after_cancel(self.path_validation_after)
         self.path_validation_after = self.after(delay_ms, self.recheck_folder)
 
     def pick_folder(self) -> None:
+        if self.is_busy or self.templates_in_progress:
+            return
         initial = (
             str(self.selected_folder.parent)
             if self.selected_folder
@@ -1406,7 +1501,7 @@ class AnalyzeApp(ttk.Window):
             self.recheck_folder()
 
     def recheck_folder(self) -> None:
-        if self.is_busy:
+        if self.is_busy or self.templates_in_progress:
             return
         if self.audit_in_progress:
             self.audit_cancel_event.set()
@@ -1427,11 +1522,13 @@ class AnalyzeApp(ttk.Window):
         self.selected_folder_var.set(str(path))
         self.validation_generation += 1
         generation = self.validation_generation
+        self.folder_check_in_progress = True
         self.folder_status.configure(
             text="ⓘ Checking folder structure and referenced images…",
             style="Status.Info.TLabel",
         )
         self.recheck_button.configure(state="disabled")
+        self.template_button.configure(state="disabled")
         self.analyze.configure(state="disabled")
         self.footer.set_status("Checking the selected folder…", StatusKind.INFO)
 
@@ -1454,6 +1551,18 @@ class AnalyzeApp(ttk.Window):
     def _apply_folder_validation(
         self, path: pathlib.Path | None, result: workflow.FolderValidation
     ) -> None:
+        self.folder_check_in_progress = False
+        if path != self.template_feedback_folder:
+            self.template_feedback_folder = path
+            self.template_status_var.set(
+                "Scan images to create info_template.xlsx. Review and fill the template before analysis."
+            )
+            self.template_details_var.set("")
+            self.template_details_visible = False
+            self.template_details_label.grid_remove()
+            self.template_details_button.configure(
+                state="disabled", text="Show template details"
+            )
         self.audit_cancel_event.set()
         self.audit_generation += 1
         self.audit_in_progress = False
@@ -1526,6 +1635,204 @@ class AnalyzeApp(ttk.Window):
     def open_input_folder(self) -> None:
         if self.selected_folder and self.selected_folder.is_dir():
             self.open_path(self.selected_folder)
+
+    def toggle_template_details(self) -> None:
+        self.template_details_visible = not self.template_details_visible
+        if self.template_details_visible and self.template_details_var.get():
+            self.template_details_label.grid(
+                row=2, column=0, sticky=tk.EW, pady=(SPACE_SM, 0)
+            )
+            self.template_details_button.configure(text="Hide template details")
+        else:
+            self.template_details_label.grid_remove()
+            self.template_details_button.configure(text="Show template details")
+
+    def _set_template_busy(self, busy: bool) -> None:
+        self.templates_in_progress = busy
+        self.config(cursor="watch" if busy else "")
+        self.set_config_state(not busy)
+        if busy:
+            self.footer.show_indeterminate_progress()
+        else:
+            self.footer.hide_progress()
+        self.update_action_buttons_state()
+
+    def _post_template_callback(self, callback: Callable, *args: object) -> None:
+        if self.closing:
+            return
+        try:
+            self.after(0, callback, *args)
+        except (RuntimeError, tk.TclError):
+            # The window may have closed after the worker checked its state.
+            return
+
+    def _template_callback_is_current(self, generation: int) -> bool:
+        return (
+            not self.closing
+            and generation == self.template_generation
+            and bool(self.winfo_exists())
+        )
+
+    def _apply_template_progress(
+        self, generation: int, event: workflow.ProgressEvent
+    ) -> None:
+        if (
+            self._template_callback_is_current(generation)
+            and self.templates_in_progress
+        ):
+            self.template_status_var.set(event.message)
+            self.footer.set_status(event.message, StatusKind.BUSY)
+
+    def build_info_templates(self) -> None:
+        raw = self.selected_folder_var.get().strip()
+        path = (
+            workflow.normalize_path_text(raw, base=pathlib.Path.cwd()) if raw else None
+        )
+        if not can_build_info_templates(
+            path,
+            busy=self.is_busy
+            or self.templates_in_progress
+            or self.folder_check_in_progress
+            or self.audit_in_progress,
+        ):
+            return
+        assert path is not None
+        if self.path_validation_after is not None:
+            self.after_cancel(self.path_validation_after)
+            self.path_validation_after = None
+        self.validation_generation += 1
+        self.template_generation += 1
+        generation = self.template_generation
+        self.template_cancel_event = threading.Event()
+        self.template_feedback_folder = path
+        cancellation = self.template_cancel_event
+        self.template_status_var.set("Scanning images for info templates…")
+        self.template_details_var.set("")
+        self.template_details_visible = False
+        self.template_details_label.grid_remove()
+        self.template_details_button.configure(
+            state="disabled", text="Show template details"
+        )
+        self._set_template_busy(True)
+
+        def progress(event: workflow.ProgressEvent) -> None:
+            self._post_template_callback(
+                self._apply_template_progress, generation, event
+            )
+
+        def worker() -> None:
+            try:
+                scan = workflow.scan_info_templates(
+                    path, progress=progress, cancel_event=cancellation
+                )
+            except workflow.AnalysisCancelled:
+                self._post_template_callback(
+                    self._finish_info_templates,
+                    generation,
+                    workflow.InfoTemplateScan(),
+                    workflow.InfoTemplateResult(cancelled=True),
+                )
+            except Exception as ex:
+                self._post_template_callback(
+                    self._finish_info_templates,
+                    generation,
+                    workflow.InfoTemplateScan(errors=(str(ex),)),
+                    workflow.InfoTemplateResult(),
+                )
+            else:
+                self._post_template_callback(
+                    self._finish_template_scan, generation, scan
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_template_scan(
+        self, generation: int, scan: workflow.InfoTemplateScan
+    ) -> None:
+        if not self._template_callback_is_current(generation):
+            return
+        if not scan.templates:
+            self._finish_info_templates(generation, scan, workflow.InfoTemplateResult())
+            return
+        existing = frozenset(
+            template.path
+            for template in scan.templates
+            if template.path.exists() or template.path.is_symlink()
+        )
+        if existing and not messagebox.askyesno(
+            "Replace existing templates?",
+            "The scan is complete. Replace these existing templates?\n\n"
+            + "\n".join(str(path) for path in sorted(existing))
+            + "\n\nAny edits in these template files will be replaced. Canceling leaves all files unchanged.",
+            parent=self,
+        ):
+            self._finish_info_templates(
+                generation, scan, workflow.InfoTemplateResult(cancelled=True)
+            )
+            return
+        cancellation = self.template_cancel_event
+
+        def progress(event: workflow.ProgressEvent) -> None:
+            self._post_template_callback(
+                self._apply_template_progress, generation, event
+            )
+
+        def worker() -> None:
+            try:
+                result = workflow.write_info_templates(
+                    scan.templates,
+                    overwrite_paths=existing,
+                    progress=progress,
+                    cancel_event=cancellation,
+                )
+            except Exception as ex:
+                result = workflow.InfoTemplateResult(errors=(str(ex),))
+            self._post_template_callback(
+                self._finish_info_templates, generation, scan, result
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_info_templates(
+        self,
+        generation: int,
+        scan: workflow.InfoTemplateScan,
+        result: workflow.InfoTemplateResult,
+    ) -> None:
+        if not self._template_callback_is_current(generation):
+            return
+        errors = scan.errors + result.errors
+        details = [f"Created: {path}" for path in result.paths]
+        for template in scan.templates:
+            details.extend(
+                f"{template.plate.name}: {warning}" for warning in template.warnings
+            )
+            details.extend(
+                f"Position needed: {image}" for image in template.unresolved_images
+            )
+        details.extend(errors)
+        self.template_details_var.set("\n".join(details))
+        self.template_details_button.configure(
+            state="normal" if details else "disabled"
+        )
+        if result.cancelled:
+            message = (
+                f"Template generation cancelled. {len(result.paths)} templates created."
+                if result.paths
+                else "Template generation cancelled. No files were written."
+            )
+        elif result.paths:
+            message = f"Created {len(result.paths)} template(s); {result.unresolved_images} image(s) need positions. Fill in positions, genotype, and measured lengths, save as info.xlsx, then Re-check."
+        else:
+            message = (
+                "No templates created. See template details for the problems to fix."
+            )
+        if errors:
+            message += f" {len(errors)} plate or file error(s); see template details."
+        self.template_status_var.set(message)
+        for error in errors:
+            pipio.logger.warning("Info template: %s", error)
+        self._set_template_busy(False)
 
     def refresh_previous_runs(self) -> None:
         self.previous_runs = workflow.discover_runs(self.selected_folder)
@@ -1731,7 +2038,12 @@ class AnalyzeApp(ttk.Window):
         return workflow.CalibrationSpec("manual", value)
 
     def start_calibration_audit(self) -> None:
-        if self.audit_in_progress or not self.folder_validation.referenced_images:
+        if (
+            self.is_busy
+            or self.templates_in_progress
+            or self.audit_in_progress
+            or not self.folder_validation.referenced_images
+        ):
             return
         self.audit_in_progress = True
         self.audit_generation += 1
@@ -2075,7 +2387,8 @@ class AnalyzeApp(ttk.Window):
                 config_valid = True
             except Exception:
                 config_valid = False
-        valid = self.folder_validation.valid and config_valid and not self.is_busy
+        locked = self.is_busy or self.templates_in_progress
+        valid = self.folder_validation.valid and config_valid and not locked
         self.analysis_ready = valid
         self.cancel_button.configure(state="normal" if self.is_busy else "disabled")
         existing = self.selected_folder is not None and self.selected_folder.is_dir()
@@ -2083,9 +2396,19 @@ class AnalyzeApp(ttk.Window):
             state="normal" if existing and not self.is_busy else "disabled"
         )
         self.recheck_button.configure(
-            state="normal" if not self.is_busy else "disabled"
+            state="normal"
+            if not locked and not self.folder_check_in_progress
+            else "disabled"
         )
-        selected_run = self.selected_run is not None and not self.is_busy
+        self.template_button.configure(
+            state="normal"
+            if can_build_info_templates(
+                self.selected_folder,
+                busy=locked or self.folder_check_in_progress or self.audit_in_progress,
+            )
+            else "disabled"
+        )
+        selected_run = self.selected_run is not None and not locked
         self.open_previous_run_button.configure(
             state="normal" if selected_run else "disabled"
         )
@@ -2102,13 +2425,13 @@ class AnalyzeApp(ttk.Window):
             self.selected_folder and workflow.cache_directories(self.selected_folder)
         )
         self.clear_cache_button.configure(
-            state="normal" if has_cache and not self.is_busy else "disabled"
+            state="normal" if has_cache and not locked else "disabled"
         )
         self.audit_button.configure(
             state="normal"
             if self.folder_validation.referenced_images
             and not self.audit_in_progress
-            and not self.is_busy
+            and not locked
             else "disabled"
         )
         self.audit_details_button.configure(
@@ -2169,7 +2492,12 @@ class AnalyzeApp(ttk.Window):
         self.after(500, self._update_elapsed)
 
     def analyze_selected_folder(self) -> None:
-        if not self.folder_validation.valid or not self.validate_configuration():
+        if (
+            self.is_busy
+            or self.templates_in_progress
+            or not self.folder_validation.valid
+            or not self.validate_configuration()
+        ):
             return
         try:
             request = self.build_analysis_request()
@@ -2401,20 +2729,26 @@ def version():
 
 
 @tapp.command()
-def update():
-    import requests
-    import zipfile
-
-    print("Downloading app from server ...")
-    new_version = requests.get(
-        "http://users.df.uba.ar/hgrecco/pkg/plantsinplates-app"
-    ).content
-    with open(".tmp.new_version", mode="wb") as fo:
-        fo.write(new_version)
-    print("Updating environment ...")
-    with zipfile.ZipFile(".tmp.new_version") as z:
-        z.extract("pixi.toml")
-        z.extract("pixi.lock")
+def update(check: Annotated[bool, typer.Option("--check")] = False):
+    """Check GitHub or hand installation to the independent updater."""
+    root = updates.application_root()
+    if check:
+        raise typer.Exit(updates.main(["--root", str(root), "--check"]))
+    try:
+        updates.validate_installation(root)
+        release = updates.check_for_update(pipio.__version__)
+        if release is None:
+            typer.echo("No newer stable release is available.")
+            return
+        stage = updates.stage_update(root, release)
+        updates.prepare_updater(root)
+        updates.launch_installer(root, stage)
+        typer.echo(
+            f"Installer started for {release.version}. See {root / updates.UPDATE_DIRECTORY / 'update.log'}."
+        )
+    except (updates.UpdateError, OSError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
 
 
 @tapp.command()
@@ -2469,4 +2803,12 @@ def test(
 
 
 if __name__ == "__main__":
-    tapp()
+    try:
+        if sys.argv[1:2] in (["gui"], ["test"]):
+            with updates.application_session(updates.application_root()):
+                tapp()
+        else:
+            tapp()
+    except updates.UpdateError as error:
+        typer.echo(str(error), err=True)
+        raise SystemExit(1) from error

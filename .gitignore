@@ -168,3 +168,4 @@ cython_debug/
 *.egg-info
 
 .DS_Store
+.plantsinplates_updates/

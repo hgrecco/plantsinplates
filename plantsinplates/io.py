@@ -8,9 +8,8 @@ import bioio_czi
 from skimage import io as skio
 
 from .types import IntensityImage, is_intensity_image
+from .version import __version__ as __version__
 from .workflow import CACHE_DIRECTORY
-
-__version__ = "2026.07.17"
 
 PREFIX = "_output_"
 

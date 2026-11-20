@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pathlib
+import re
 import shutil
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -19,6 +22,9 @@ from typing import Any, Callable, Literal
 
 import bioio_czi
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from .measurement_config import MeasurementConfig
 
@@ -27,6 +33,7 @@ RUN_SCHEMA_VERSION = 1
 CACHE_DIRECTORY = ".plantsinplates_cache"
 RUN_PREFIX = "_output_"
 IMAGE_SUFFIXES = {".czi", ".jpg", ".jpeg", ".tif", ".tiff", ".png"}
+INFO_TEMPLATE_NAME = "info_template.xlsx"
 
 type FolderKind = Literal["experiment", "plate"]
 type ValidationState = Literal["empty", "valid", "invalid", "inconsistent"]
@@ -101,7 +108,12 @@ class CalibrationSpec:
 @dataclass(frozen=True)
 class ProgressEvent:
     stage: Literal[
-        "validation", "calibration", "measurement", "aggregation", "reporting"
+        "validation",
+        "calibration",
+        "measurement",
+        "aggregation",
+        "reporting",
+        "templates",
     ]
     completed: int = 0
     total: int = 0
@@ -187,6 +199,41 @@ class AnalysisCancelled(Exception):
 ProgressCallback = Callable[[ProgressEvent], None]
 
 
+@dataclass(frozen=True)
+class InfoTemplate:
+    """A scanned plate workbook, with unresolved images kept on separate rows."""
+
+    plate: pathlib.Path
+    dates: tuple[str, ...]
+    rows: tuple[tuple[int | str | None, ...], ...]
+    unresolved_images: tuple[pathlib.Path, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def path(self) -> pathlib.Path:
+        return self.plate / INFO_TEMPLATE_NAME
+
+    @property
+    def columns(self) -> tuple[str, ...]:
+        return ("row", "col", "genotype") + tuple(
+            f"{date}_{suffix}" for date in self.dates for suffix in ("length", "fluo")
+        )
+
+
+@dataclass(frozen=True)
+class InfoTemplateScan:
+    templates: tuple[InfoTemplate, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class InfoTemplateResult:
+    paths: tuple[pathlib.Path, ...] = ()
+    unresolved_images: int = 0
+    errors: tuple[str, ...] = ()
+    cancelled: bool = False
+
+
 def folder_kind(path: pathlib.Path) -> FolderKind | None:
     if path.stem.startswith("experiment"):
         return "experiment"
@@ -213,6 +260,265 @@ def _date_key(path: pathlib.Path) -> str | None:
         return None
     rest = path.name.removeprefix("date_")
     return rest.split("_", 1)[0] or None
+
+
+def _check_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise AnalysisCancelled()
+
+
+def _is_managed_path(path: pathlib.Path, base: pathlib.Path) -> bool:
+    parts = path.relative_to(base).parts
+    return CACHE_DIRECTORY in parts or any(
+        part.startswith(RUN_PREFIX) for part in parts
+    )
+
+
+def _discover_date_directories(
+    folder: pathlib.Path, cancel_event: threading.Event | None = None
+) -> dict[str, list[pathlib.Path]]:
+    dates: dict[str, list[pathlib.Path]] = {}
+    for path in sorted(folder.rglob("date_*")):
+        _check_cancelled(cancel_event)
+        if path.is_dir() and not _is_managed_path(path, folder):
+            key = _date_key(path)
+            if key:
+                dates.setdefault(key, []).append(path)
+    return dates
+
+
+def _scan_plate_info_template(
+    plate: pathlib.Path,
+    progress: ProgressCallback | None,
+    cancel_event: threading.Event | None,
+) -> InfoTemplate:
+    dates = _discover_date_directories(plate, cancel_event)
+    if not dates:
+        raise ValueError("no usable date_* folders were found")
+    duplicates = [key for key, paths in dates.items() if len(paths) > 1]
+    if duplicates:
+        raise ValueError(
+            "multiple date folders match: " + ", ".join(sorted(duplicates))
+        )
+
+    matched: dict[tuple[int, int], dict[str, list[pathlib.Path]]] = {}
+    unresolved: list[tuple[str, pathlib.Path]] = []
+    warnings: list[str] = []
+    date_keys = tuple(sorted(dates))
+    for date in date_keys:
+        date_dir = dates[date][0]
+        if progress:
+            progress(
+                ProgressEvent(
+                    "templates",
+                    message=f"Scanning {plate.name}/{date_dir.name}…",
+                    current_path=date_dir,
+                    plate=plate.name,
+                )
+            )
+        for image in sorted(date_dir.rglob("*")):
+            _check_cancelled(cancel_event)
+            if (
+                not image.is_file()
+                or image.suffix.lower() not in IMAGE_SUFFIXES
+                or image.stem.startswith(".")
+                or image.stem.lower().startswith("overview")
+                or _is_managed_path(image, date_dir)
+            ):
+                continue
+            # A nested date directory owns its own images.
+            if any(
+                _date_key(parent) is not None
+                for parent in image.relative_to(date_dir).parents
+                if parent != pathlib.Path(".")
+            ):
+                continue
+            match = re.fullmatch(
+                r"fluo_([0-9]+)_([0-9]+)", image.stem, flags=re.IGNORECASE
+            )
+            if match is None:
+                unresolved.append((date, image))
+            else:
+                position = (int(match[1]), int(match[2]))
+                matched.setdefault(position, {}).setdefault(date, []).append(image)
+
+    rows: list[tuple[int | str | None, ...]] = []
+    for position, images_by_date in sorted(matched.items()):
+        values: list[int | str | None] = [*position, None]
+        has_image = False
+        for date in date_keys:
+            images = images_by_date.get(date, [])
+            if len(images) > 1:
+                unresolved.extend((date, image) for image in images)
+                warnings.append(
+                    f"{date}: multiple images for row {position[0]}, col {position[1]}; positions left blank on separate rows."
+                )
+                images = []
+            relative = (
+                images[0].relative_to(dates[date][0]).as_posix() if images else None
+            )
+            values.extend((None, relative))
+            has_image = has_image or bool(images)
+        if has_image:
+            rows.append(tuple(values))
+    for date, image in sorted(
+        unresolved, key=lambda item: (item[0], item[1].as_posix())
+    ):
+        values = [None] * (3 + 2 * len(date_keys))
+        values[4 + 2 * date_keys.index(date)] = image.relative_to(
+            dates[date][0]
+        ).as_posix()
+        rows.append(tuple(values))
+    if not rows:
+        raise ValueError("no root images were found in date folders")
+    return InfoTemplate(
+        plate,
+        date_keys,
+        tuple(rows),
+        tuple(image for _date, image in unresolved),
+        tuple(warnings),
+    )
+
+
+def scan_info_templates(
+    folder: pathlib.Path,
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> InfoTemplateScan:
+    """Scan a plate or experiment without requiring or changing existing workbooks.
+
+    Only ``fluo_<row>_<col>`` filenames infer a plant position. Unknown or
+    conflicting images get separate rows with blank identifiers. Root lengths
+    and genotypes are always left blank. Cancellation raises AnalysisCancelled.
+    """
+    _check_cancelled(cancel_event)
+    folder = folder.resolve()
+    kind = folder_kind(folder)
+    if not folder.is_dir() or kind is None:
+        raise ValueError("Choose an existing experiment_* or plate_* folder")
+    plates = (
+        [folder]
+        if kind == "plate"
+        else sorted(path for path in folder.glob("plate_*") if path.is_dir())
+    )
+    if not plates:
+        raise ValueError("No plate_* folders were found")
+    templates: list[InfoTemplate] = []
+    errors: list[str] = []
+    for index, plate in enumerate(plates):
+        _check_cancelled(cancel_event)
+        if progress:
+            progress(
+                ProgressEvent(
+                    "templates",
+                    index,
+                    len(plates),
+                    f"Scanning plate {index + 1}/{len(plates)}: {plate.name}",
+                    plate,
+                    plate.name,
+                )
+            )
+        try:
+            templates.append(_scan_plate_info_template(plate, progress, cancel_event))
+        except (OSError, ValueError) as ex:
+            errors.append(f"{plate.name}: {ex}")
+    return InfoTemplateScan(tuple(templates), tuple(errors))
+
+
+def _write_info_template(
+    template: InfoTemplate,
+    overwrite: bool,
+    cancel_event: threading.Event | None,
+) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "info"
+    sheet.append(template.columns)
+    for row in template.rows:
+        _check_cancelled(cancel_event)
+        sheet.append(row)
+    for row in sheet:
+        for cell in row:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="4472C4")
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for index, column in enumerate(template.columns, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = (
+            48 if column.endswith("_fluo") else max(12, len(column) + 2)
+        )
+
+    temporary: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".info-template-", suffix=".xlsx", dir=template.plate, delete=False
+        ) as stream:
+            temporary = pathlib.Path(stream.name)
+        workbook.save(temporary)
+        _check_cancelled(cancel_event)
+        if overwrite:
+            os.replace(temporary, template.path)
+        else:
+            # Publishing a hard link is atomic and cannot replace a file that
+            # appeared after the scan. Both paths are on the same filesystem.
+            os.link(temporary, template.path)
+    finally:
+        workbook.close()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def write_info_templates(
+    templates: tuple[InfoTemplate, ...],
+    *,
+    overwrite_paths: frozenset[pathlib.Path] = frozenset(),
+    progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> InfoTemplateResult:
+    """Publish scanned templates, replacing only explicitly approved paths.
+
+    Each workbook is written completely before publication. Failures preserve
+    existing templates and are reported per plate. Cancellation keeps already
+    completed workbooks and removes unfinished temporary files.
+    """
+    paths: list[pathlib.Path] = []
+    errors: list[str] = []
+    unresolved = 0
+    for index, template in enumerate(templates, 1):
+        try:
+            _check_cancelled(cancel_event)
+            _write_info_template(
+                template, template.path in overwrite_paths, cancel_event
+            )
+        except AnalysisCancelled:
+            return InfoTemplateResult(
+                tuple(paths), unresolved, tuple(errors), cancelled=True
+            )
+        except Exception as ex:
+            errors.append(
+                f"{template.plate.name}: could not write {INFO_TEMPLATE_NAME}: {ex}"
+            )
+        else:
+            paths.append(template.path)
+            unresolved += len(template.unresolved_images)
+        if progress:
+            progress(
+                ProgressEvent(
+                    "templates",
+                    index,
+                    len(templates),
+                    f"Wrote {len(paths)}/{len(templates)} templates",
+                    template.path,
+                    template.plate.name,
+                    errors=len(errors),
+                )
+            )
+    return InfoTemplateResult(tuple(paths), unresolved, tuple(errors))
 
 
 def _read_plate_contract(
@@ -257,18 +563,7 @@ def _read_plate_contract(
             "missing _length columns for dates: " + ", ".join(missing_length)
         )
 
-    date_dirs_by_key: dict[str, list[pathlib.Path]] = {}
-    for date_dir in folder.rglob("date_*"):
-        if not date_dir.is_dir():
-            continue
-        relative_parts = date_dir.relative_to(folder).parts
-        if CACHE_DIRECTORY in relative_parts or any(
-            part.startswith(RUN_PREFIX) for part in relative_parts
-        ):
-            continue
-        key = _date_key(date_dir)
-        if key:
-            date_dirs_by_key.setdefault(key, []).append(date_dir)
+    date_dirs_by_key = _discover_date_directories(folder)
     date_dirs: dict[str, pathlib.Path] = {}
     for key, paths in date_dirs_by_key.items():
         if len(paths) > 1:

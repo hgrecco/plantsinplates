@@ -4,7 +4,9 @@ import importlib.util
 import pathlib
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 from openpyxl import Workbook
 import ttkbootstrap as ttk
@@ -157,6 +159,175 @@ class WorkflowValidationTests(unittest.TestCase):
         text, kind = gui.completion_feedback(False, 2)
         self.assertEqual(kind, "warning")
         self.assertIn("2 image or processing errors", text)
+
+
+class InfoTemplateGuiTests(unittest.TestCase):
+    def shell(self) -> gui.AnalyzeApp:
+        """Use the real decision methods without constructing a Tk window."""
+        app = object.__new__(gui.AnalyzeApp)
+        app.is_busy = False
+        app.templates_in_progress = True
+        app.closing = False
+        app.template_generation = 1
+        app.template_cancel_event = threading.Event()
+        app.winfo_exists = mock.Mock(return_value=True)
+        app.template_status_var = mock.Mock()
+        app.template_details_var = mock.Mock()
+        app.template_details_button = mock.Mock()
+        app.config = mock.Mock()
+        app.set_config_state = mock.Mock()
+        app.footer = mock.Mock()
+        app.update_action_buttons_state = mock.Mock()
+        # Run worker callbacks immediately to make decisions observable.
+        app._post_template_callback = lambda callback, *args: callback(*args)
+        return app
+
+    def test_button_available_without_info_but_blocked_during_other_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for name in ("plate_001", "experiment_001", "other"):
+                (root / name).mkdir()
+            self.assertTrue(gui.can_build_info_templates(root / "plate_001"))
+            self.assertTrue(gui.can_build_info_templates(root / "experiment_001"))
+            self.assertFalse(
+                gui.can_build_info_templates(root / "plate_001", busy=True)
+            )
+            self.assertFalse(gui.can_build_info_templates(root / "other"))
+            self.assertFalse(gui.can_build_info_templates(root / "plate_missing"))
+            self.assertFalse(gui.can_build_info_templates(None))
+
+    def test_declining_overwrite_writes_nothing_and_restores_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            plate = pathlib.Path(temporary)
+            template = gui.workflow.InfoTemplate(plate, ("20260101",), ())
+            template.path.write_bytes(b"edited template")
+            app = self.shell()
+            with (
+                mock.patch.object(
+                    gui.messagebox, "askyesno", return_value=False
+                ) as ask,
+                mock.patch.object(gui.workflow, "write_info_templates") as write,
+                mock.patch.object(gui.threading, "Thread") as thread,
+            ):
+                app._finish_template_scan(1, gui.workflow.InfoTemplateScan((template,)))
+            ask.assert_called_once()
+            self.assertIn(str(template.path), ask.call_args.args[1])
+            write.assert_not_called()
+            thread.assert_not_called()
+            self.assertEqual(template.path.read_bytes(), b"edited template")
+            self.assertFalse(app.templates_in_progress)
+            app.set_config_state.assert_called_once_with(True)
+            app.footer.hide_progress.assert_called_once()
+            self.assertIn(
+                "No files were written", app.template_status_var.set.call_args.args[0]
+            )
+
+    def test_approval_covers_only_existing_destinations_and_success_lists_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            templates = tuple(
+                gui.workflow.InfoTemplate(root / name, ("20260101",), ())
+                for name in ("plate_001", "plate_002")
+            )
+            templates[0].plate.mkdir()
+            templates[0].path.write_bytes(b"old template")
+            app = self.shell()
+            result = gui.workflow.InfoTemplateResult(
+                paths=tuple(template.path for template in templates),
+                unresolved_images=2,
+            )
+            with (
+                mock.patch.object(gui.messagebox, "askyesno", return_value=True),
+                mock.patch.object(
+                    gui.workflow, "write_info_templates", return_value=result
+                ) as write,
+                mock.patch.object(gui.threading, "Thread") as thread,
+            ):
+                thread.side_effect = lambda *, target, daemon: type(
+                    "ImmediateThread", (), {"start": lambda self: target()}
+                )()
+                app._finish_template_scan(1, gui.workflow.InfoTemplateScan(templates))
+            self.assertEqual(
+                write.call_args.kwargs["overwrite_paths"],
+                frozenset({templates[0].path}),
+            )
+            self.assertFalse(app.templates_in_progress)
+            details = app.template_details_var.set.call_args.args[0]
+            self.assertTrue(
+                all(str(template.path) in details for template in templates)
+            )
+            self.assertIn(
+                "2 image(s) need positions",
+                app.template_status_var.set.call_args.args[0],
+            )
+
+    def test_write_failure_and_empty_scan_restore_controls(self) -> None:
+        app = self.shell()
+        template = gui.workflow.InfoTemplate(
+            pathlib.Path("plate_001"), ("20260101",), ()
+        )
+        with (
+            mock.patch.object(
+                gui.workflow, "write_info_templates", side_effect=OSError("disk full")
+            ),
+            mock.patch.object(gui.threading, "Thread") as thread,
+        ):
+            thread.side_effect = lambda *, target, daemon: type(
+                "ImmediateThread", (), {"start": lambda self: target()}
+            )()
+            app._finish_template_scan(1, gui.workflow.InfoTemplateScan((template,)))
+        self.assertFalse(app.templates_in_progress)
+        self.assertIn("disk full", app.template_details_var.set.call_args.args[0])
+        app.templates_in_progress = True
+        app._finish_template_scan(
+            1, gui.workflow.InfoTemplateScan(errors=("plate_001: no root images",))
+        )
+        self.assertFalse(app.templates_in_progress)
+        self.assertIn("no root images", app.template_details_var.set.call_args.args[0])
+
+    def test_scan_failure_restores_controls_and_stale_callbacks_are_ignored(
+        self,
+    ) -> None:
+        app = self.shell()
+        with tempfile.TemporaryDirectory() as temporary:
+            plate = pathlib.Path(temporary) / "plate_001"
+            plate.mkdir()
+            app.templates_in_progress = False
+            app.selected_folder_var = mock.Mock()
+            app.selected_folder_var.get.return_value = str(plate)
+            app.folder_check_in_progress = False
+            app.audit_in_progress = False
+            app.path_validation_after = None
+            app.validation_generation = 0
+            app.template_details_label = mock.Mock()
+            with (
+                mock.patch.object(
+                    gui.workflow,
+                    "scan_info_templates",
+                    side_effect=OSError("cannot read folder"),
+                ),
+                mock.patch.object(gui.threading, "Thread") as thread,
+            ):
+                thread.side_effect = lambda *, target, daemon: type(
+                    "ImmediateThread", (), {"start": lambda self: target()}
+                )()
+                app.build_info_templates()
+        self.assertFalse(app.templates_in_progress)
+        self.assertIn(
+            "cannot read folder", app.template_details_var.set.call_args.args[0]
+        )
+        app.template_status_var.reset_mock()
+        app._finish_info_templates(
+            1, gui.workflow.InfoTemplateScan(), gui.workflow.InfoTemplateResult()
+        )
+        app.template_status_var.set.assert_not_called()
+        app.closing = True
+        app._finish_info_templates(
+            2, gui.workflow.InfoTemplateScan(), gui.workflow.InfoTemplateResult()
+        )
+        app.template_status_var.set.assert_not_called()
 
 
 if __name__ == "__main__":
